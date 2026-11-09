@@ -1,0 +1,29 @@
+{
+  "crons": [
+    {
+      "path": "/api/sync-ratings",
+      "schedule": "0 12 * * 5"
+    },
+    {
+      "path": "/api/td-log",
+      "schedule": "0 14 * * 4"
+    }
+  ],
+  "functions": {
+    "api/td.js": {
+      "maxDuration": 60,
+      "memory": 1024
+    },
+    "api/season-stats.js": {
+      "maxDuration": 60,
+      "memory": 1024
+    },
+    "api/week-stats.js": {
+      "maxDuration": 60,
+      "memory": 1024
+    },
+    "api/td-log.js": {
+      "maxDuration": 60
+    }
+  }
+}
