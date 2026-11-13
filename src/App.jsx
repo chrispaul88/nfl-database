@@ -1061,6 +1061,12 @@ function FormationView({ roster, abbr, unit, setUnit, onSelectPlayer, lineRank, 
     const starters = roster
       .filter((p) => { const b = baseOf(p); return b && ROW_OF(b) && depthNo(p) <= maxFor(b) && !(p.depthSrc === "sleeper" && airRows.has(ROW_OF(b))); })
       .sort((a, b) => sideKey(baseOf(a), depthNo(a)) - sideKey(baseOf(b), depthNo(b)) || depthNo(a) - depthNo(b));
+    // Two players can carry the same label (an "NT" and an "NT1", or a stale
+    // duplicate). Only the first `maxFor` at each label are starters; any
+    // extra is a backup, which is exactly who next-man-up should find.
+    const seenAt = {};
+    const capped = starters.filter((p) => { const b = baseOf(p); seenAt[b] = (seenAt[b] || 0) + 1; return seenAt[b] <= maxFor(b); });
+    starters.length = 0; starters.push(...capped);
     const starterIds = new Set(starters.map((p) => p.id));
     starters.forEach((p) => {
       let who = p, nextUp = false;
@@ -2225,7 +2231,9 @@ function computeLineRanks(players, teams) {
     };
     // def = whole defense: top-11 rated defenders, needs 7+ to count.
     // Scheme-agnostic on purpose — a 3-4 and a 4-3 team compare fairly.
-    per[a] = { ol: { avg: avgTop(OL_POS, 5) }, dl: { avg: avgTop(DL_POS, 4) }, def: { avg: avgTop(DEF_POS, 11, 7) } };
+    // Needs 5+ rated healthy defenders (was 7): rookie-heavy units like a
+    // team starting several unrated draft picks still get a grade.
+    per[a] = { ol: { avg: avgTop(OL_POS, 5) }, dl: { avg: avgTop(DL_POS, 4) }, def: { avg: avgTop(DEF_POS, 11, 5) } };
   }
   for (const key of ["ol", "dl", "def"]) {
     const ranked = Object.entries(per)
