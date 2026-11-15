@@ -1582,6 +1582,59 @@ function PlayersTab({ players, onSelect, pills, forceInj, since }) {
 // ═══════════════ INJURY FEED (newest update first) ═══════════════
 // One row per injured player, sorted by the time ESPN last touched the record.
 // Return date: ESPN's returnDate, else Airtable's Est Return, else "—".
+// ═══════════════ NEWS TICKER ═══════════════════════════════════════
+// A one-line wire above the bottom nav: injury designations, newest first,
+// one item every few seconds. "JETS · GARRETT WILSON · QUESTIONABLE" with the
+// injury, ESPN's note and the estimated return underneath.
+function injuryWire(players) {
+  const out = [];
+  for (const p of players) {
+    const a = toAbbr(teamOfPlayer(p) || p.teamName || "");
+    const inj = injFor(p.name, a);
+    const e = inj && inj.espn_id ? INJ_ESPN[String(inj.espn_id)] : null;
+    const status = (e && e.status && !/^(active|inactive)$/i.test(e.status)) ? e.status
+      : (inj && inj.injury_status) || (inj && /injured reserve/i.test(String(inj.status || "")) ? "IR" : "") || "";
+    if (!status) continue;
+    const d = injuryDetail(p, a);
+    const rawWhen = (e && e.date) || (inj && inj.injury_start_date) || null;
+    const when = rawWhen ? new Date(rawWhen) : null;
+    const note = (e && e.comment && !/^\s*(inactive|active|out|questionable|doubtful|probable)\.?\s*$/i.test(e.comment)) ? e.comment : "";
+    out.push({ p, a, status: String(status).toUpperCase(), injury: d ? d.label : (p.injuryNotes ? injCase(p.injuryNotes) : ""), note, ret: fmtReturn(p.estReturn || (e && e.returnDate) || null), when: when && !isNaN(when) ? when : null });
+  }
+  return out.sort((x, y) => (y.when ? y.when.getTime() : 0) - (x.when ? x.when.getTime() : 0));
+}
+function NewsTicker({ players, onSelect }) {
+  const items = useMemo(() => injuryWire(players), [players]);
+  const [i, setI] = useState(0);
+  const [paused, setPaused] = useState(false);
+  useEffect(() => {
+    if (!items.length || paused) return;
+    const t = setInterval(() => setI((n) => (n + 1) % items.length), 7000);
+    return () => clearInterval(t);
+  }, [items.length, paused]);
+  if (!items.length) return null;
+  const it = items[i % items.length];
+  const tone = /out|ir|pup|nfi|sus|doubt/i.test(it.status) ? "bg-rose-600" : /quest/i.test(it.status) ? "bg-amber-400" : "bg-slate-500";
+  const nick = (HELMET_NICK[it.a] || it.a);
+  const detail = [it.injury ? "(" + it.injury + ")" : "", it.note, it.ret ? "est. return " + it.ret : ""].filter(Boolean).join(" · ");
+  return (
+    <div className="fixed inset-x-0 z-20 bg-slate-900 border-t border-slate-800 text-white" style={{ bottom: "calc(env(safe-area-inset-bottom) + 3.75rem)" }}
+      onTouchStart={() => setPaused(true)} onTouchEnd={() => setPaused(false)}>
+      <button onClick={() => onSelect(it.p)} className="w-full flex items-stretch text-left">
+        <span className={"w-1 shrink-0 " + tone} />
+        <img src={TEAM_LOGOS[it.a]} alt="" className="w-9 h-9 object-contain self-center ml-2 mr-2 shrink-0" />
+        <span className="min-w-0 flex-1 py-1.5 pr-3">
+          <span key={i} className="block text-[10px] font-extrabold tracking-widest uppercase truncate" style={{ animation: "hrbFadeIn .4s ease-out" }}>{nick} · {it.p.name} · <span className={/out|ir|pup|nfi|sus|doubt/i.test(it.status) ? "text-rose-400" : /quest/i.test(it.status) ? "text-amber-300" : ""}>{it.status}</span></span>
+          <span className="block overflow-hidden whitespace-nowrap text-[11px] text-slate-300">
+            <span key={"d" + i} className="inline-block" style={detail.length > 48 ? { animation: `hrbMarquee ${Math.max(8, detail.length / 6)}s linear infinite`, paddingLeft: "100%" } : undefined}>{detail || "No details reported."}</span>
+          </span>
+        </span>
+        <span className="self-center pr-3 text-[9px] font-bold text-slate-500 tabular-nums">{(i % items.length) + 1}/{items.length}</span>
+      </button>
+      <style>{`@keyframes hrbMarquee { 0% { transform: translateX(0) } 100% { transform: translateX(-100%) } } @keyframes hrbFadeIn { from { opacity: 0; transform: translateY(4px) } to { opacity: 1; transform: none } }`}</style>
+    </div>
+  );
+}
 function InjuryFeed({ players, onSelect, q, setQ, pills, dark, since, embedded }) {
   const rows = useMemo(() => {
     const out = [];
@@ -3362,15 +3415,19 @@ function TdBoardTab({ players, teams, onSelect, navTick, seasonStats }) {
           // [key, label, lowest line tried, highest, step, FLOOR]. The floor is the
           // "is this even a bet" knob: a line under it (3 carries for a bell-cow
           // back, 1 target for a WR1) is a gimme, so it shows a dash instead.
-          const COLS = [["tgt", "Tgt", 1, 15, 1, 4], ["rec", "Rec", 1, 12, 1, 3], ["recYds", "Rec Yds", 10, 150, 5, 30], ["rushYds", "Rush Yds", 10, 150, 5, 30], ["td", "Any TD", 1, 3, 1, 1]];
+          const COLS = [["tgt", "Tgt", 1, 15, 1, 4], ["rec", "Rec", 1, 12, 1, 3], ["recYds", "Rec Yds", 10, 150, 5, 30], ["rushYds", "Rush Yds", 10, 150, 5, 30], ["td", "Any TD", 1, 3, 1, 1]];   // TD box judged at thr-20 (see lineFor)
           const MIN_G = 3;
           const statOf = (g, key) => key === "td" ? (g.recTd || 0) + (g.rushTd || 0) : (g[key] || 0);
           const lineFor = (games, key, lo, hi, step, floor) => {
             if (games.length < MIN_G) return null;
+            // Touchdowns are rare events: even elite scorers only find the end
+            // zone in ~60% of games, so the TD box uses a lower bar than the
+            // volume boxes (20 points under the toggle, never below 50%).
+            const need = (key === "td" ? Math.max(50, thr - 20) : thr) / 100;
             let best = null;
             for (let L = lo; L <= hi; L += step) {
               const hits = games.filter((g) => statOf(g, key) >= L).length, rate = hits / games.length;
-              if (rate >= thr / 100) best = { L, pct: Math.round(rate * 100) }; else break;
+              if (rate >= need) best = { L, pct: Math.round(rate * 100) }; else break;
             }
             return best && best.L >= floor ? best : null;
           };
@@ -3470,7 +3527,7 @@ function TdBoardTab({ players, teams, onSelect, navTick, seasonStats }) {
                   <button key={k || "all"} onClick={() => setCheatTeam(k)} className={"shrink-0 rounded-full px-3 py-1.5 text-[11px] font-extrabold " + (cheatTeam === k ? "bg-blue-600 text-white" : "bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300")}>{lbl}</button>
                 ))}
               </div>
-              <div className="px-1 mb-3 text-[10px] font-semibold text-slate-400">Each box is the highest line the player has cleared in at least {thr}% of his games{locked ? ` through Week ${(sb.week || 1) - 1}` : " this season"}. A dash means no line clears {thr}%, or the only line that does is too low to matter (floors: 4 tgt · 3 rec · 30 yds · 1 TD). Green row = good spot ({goodCount} this week). Amber boxes are season red-zone looks (targets inside the 20, end-zone targets, carries inside the 20 and the 5) with the player's share of the team's; bright amber = he owns that role. Tap a player for his game log.</div>
+              <div className="px-1 mb-3 text-[10px] font-semibold text-slate-400">Each box is the highest line the player has cleared in at least {thr}% of his games{locked ? ` through Week ${(sb.week || 1) - 1}` : " this season"}. A dash means no line clears {thr}%, or the only line that does is too low to matter (floors: 4 tgt · 3 rec · 30 yds). The TD box uses a lower bar, {Math.max(50, thr - 20)}%, because even top scorers don't score every week. Green row = good spot ({goodCount} this week). Amber boxes are season red-zone looks (targets inside the 20, end-zone targets, carries inside the 20 and the 5) with the player's share of the team's; bright amber = he owns that role. Tap a player for his game log.</div>
               {gamesByDay.map((grp) => {
                 const gs = grp.games.filter((g) => games.includes(g));
                 if (!gs.length) return null;
@@ -4638,7 +4695,7 @@ export default function App() {
           onStatJump={(j) => { setJumpBack({ tab, sel: null, selTeam, label: selTeam.name }); setStatJump(j); setSel(null); setSelTeam(null); setTab("stats"); }}
         />
       )}
-      <div className="pb-28">
+      <div className="pb-40">
         {players && tab === "targets" && <TdBoardTab players={players} teams={mergedTeams} onSelect={setSel} navTick={navTick} seasonStats={seasonStats} />}
         {players && tab === "players" && <PlayersHub players={players} onSelect={setSel} />}
         {players && tab === "stats" && <StatsTab players={players} onSelect={setSel} seasonStats={seasonStats} jump={statJump} onJumpUsed={() => setStatJump(null)}
@@ -4646,6 +4703,7 @@ export default function App() {
           onBack={jumpBack ? () => { setTab(jumpBack.tab); setSelTeam(jumpBack.selTeam); setSel(jumpBack.sel); setJumpBack(null); } : undefined} />}
       </div>
 
+      {players && <NewsTicker players={players} onSelect={setSel} />}
       <div className="fixed bottom-0 inset-x-0 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex pb-[env(safe-area-inset-bottom)] z-20">
         {TABS.map((t) => (
           <button
