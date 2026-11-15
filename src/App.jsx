@@ -1603,35 +1603,77 @@ function injuryWire(players) {
   }
   return out.sort((x, y) => (y.when ? y.when.getTime() : 0) - (x.when ? x.when.getTime() : 0));
 }
-function NewsTicker({ players, onSelect }) {
-  const items = useMemo(() => injuryWire(players), [players]);
+// Ticker items are built per game: before kickoff a "NOTES" item for each
+// team (its injury designations), during the game a live score, after it the
+// final. The whole week's slate cycles.
+function tickerItems(games, wire) {
+  const posOf = (p) => String(p.pos || "").toUpperCase();
+  const byTeam = {};
+  for (const w of wire) (byTeam[w.a] ??= []).push(w);
+  const notes = (abbr) => (byTeam[abbr] || []).filter((w) => /out|ir|pup|doubt|quest|sus/i.test(w.status))
+    .map((w) => `${posOf(w.p)} ${w.p.name}${w.injury ? " (" + w.injury + ")" : ""} ${w.status}`);
+  const out = [];
+  for (const g of games) {
+    const base = { g, away: g.away, home: g.home };
+    if (g.state === "pre") {
+      for (const t of [g.away, g.home]) {
+        const n = notes(t.abbr);
+        out.push({ ...base, kind: "notes", team: t, head: `${(HELMET_NICK[t.abbr] || t.abbr)} NOTES`, text: n.length ? n.join(",  ") : "No injury designations reported.", items: (byTeam[t.abbr] || []) });
+      }
+    } else if (g.state === "in") {
+      out.push({ ...base, kind: "live", head: `LIVE · ${g.away.abbr} ${g.away.score ?? 0}, ${g.home.abbr} ${g.home.score ?? 0}`, text: [g.detail, g.downDistance, g.spot ? "ball on " + g.spot : "", g.redZone ? "RED ZONE" : ""].filter(Boolean).join(" · ") });
+    } else {
+      const w = (g.away.score ?? 0) >= (g.home.score ?? 0) ? g.away : g.home, l = w === g.away ? g.home : g.away;
+      out.push({ ...base, kind: "final", head: `FINAL · ${(HELMET_NICK[w.abbr] || w.abbr)} ${w.score}, ${(HELMET_NICK[l.abbr] || l.abbr)} ${l.score}`, text: `${w.name} ${w.record ? "move to " + w.record : "win"}${l.record ? "; " + l.short + " fall to " + l.record : ""}.` });
+    }
+  }
+  return out;
+}
+function NewsTicker({ players, onSelect, games, week }) {
+  const wire = useMemo(() => injuryWire(players), [players]);
+  const items = useMemo(() => tickerItems(games || [], wire), [games, wire]);
   const [i, setI] = useState(0);
   const [paused, setPaused] = useState(false);
   useEffect(() => {
     if (!items.length || paused) return;
-    const t = setInterval(() => setI((n) => (n + 1) % items.length), 7000);
+    const t = setInterval(() => setI((n) => (n + 1) % items.length), 9000);
     return () => clearInterval(t);
   }, [items.length, paused]);
   if (!items.length) return null;
   const it = items[i % items.length];
-  const tone = /out|ir|pup|nfi|sus|doubt/i.test(it.status) ? "bg-rose-600" : /quest/i.test(it.status) ? "bg-amber-400" : "bg-slate-500";
-  const nick = (HELMET_NICK[it.a] || it.a);
-  const detail = [it.injury ? "(" + it.injury + ")" : "", it.note, it.ret ? "est. return " + it.ret : ""].filter(Boolean).join(" · ");
+  const tone = it.kind === "live" ? "bg-rose-600" : it.kind === "final" ? "bg-slate-500" : "bg-blue-600";
+  const scrolling = it.text.length > 44;
+  const onTap = () => {
+    if (it.kind !== "notes") return;
+    const first = it.items.find((w) => /out|ir|pup|doubt|quest|sus/i.test(w.status));
+    if (first) onSelect(first.p);
+  };
   return (
-    <div className="fixed inset-x-0 z-20 bg-slate-900 border-t border-slate-800 text-white" style={{ bottom: "calc(env(safe-area-inset-bottom) + 3.75rem)" }}
+    <div className="fixed inset-x-0 z-20 bg-[#0b0d12] border-t border-slate-800 text-white select-none" style={{ bottom: "calc(env(safe-area-inset-bottom) + 3.75rem)" }}
       onTouchStart={() => setPaused(true)} onTouchEnd={() => setPaused(false)}>
-      <button onClick={() => onSelect(it.p)} className="w-full flex items-stretch text-left">
-        <span className={"w-1 shrink-0 " + tone} />
-        <img src={TEAM_LOGOS[it.a]} alt="" className="w-9 h-9 object-contain self-center ml-2 mr-2 shrink-0" />
-        <span className="min-w-0 flex-1 py-1.5 pr-3">
-          <span key={i} className="block text-[10px] font-extrabold tracking-widest uppercase truncate" style={{ animation: "hrbFadeIn .4s ease-out" }}>{nick} · {it.p.name} · <span className={/out|ir|pup|nfi|sus|doubt/i.test(it.status) ? "text-rose-400" : /quest/i.test(it.status) ? "text-amber-300" : ""}>{it.status}</span></span>
-          <span className="block overflow-hidden whitespace-nowrap text-[11px] text-slate-300">
-            <span key={"d" + i} className="inline-block" style={detail.length > 48 ? { animation: `hrbMarquee ${Math.max(8, detail.length / 6)}s linear infinite`, paddingLeft: "100%" } : undefined}>{detail || "No details reported."}</span>
+      <div className="flex items-stretch h-12">
+        {/* WEEK block, bottom-left like the broadcast bar */}
+        <div className="shrink-0 w-14 flex flex-col items-center justify-center bg-[#15181f] border-r border-slate-800">
+          <span className="text-[8px] font-extrabold tracking-widest text-slate-300">WEEK {week || ""}</span>
+          <span className="text-[8px] text-slate-500 mt-0.5">{(i % items.length) + 1}/{items.length}</span>
+        </div>
+        {/* the two teams in this game, home side darker-tinted */}
+        {[it.away, it.home].map((t, k) => (
+          <span key={k} className="shrink-0 w-11 flex items-center justify-center" style={{ backgroundColor: t.color || teamColorSafe(t.abbr) }}>
+            <img src={t.logo || TEAM_LOGOS[t.abbr]} alt="" className="w-7 h-7 object-contain" />
           </span>
-        </span>
-        <span className="self-center pr-3 text-[9px] font-bold text-slate-500 tabular-nums">{(i % items.length) + 1}/{items.length}</span>
-      </button>
-      <style>{`@keyframes hrbMarquee { 0% { transform: translateX(0) } 100% { transform: translateX(-100%) } } @keyframes hrbFadeIn { from { opacity: 0; transform: translateY(4px) } to { opacity: 1; transform: none } }`}</style>
+        ))}
+        <button onClick={onTap} className="min-w-0 flex-1 flex flex-col justify-center pl-2.5 pr-2 text-left">
+          <span key={"h" + i} className="block text-[10px] font-black tracking-widest uppercase truncate" style={{ animation: "hrbFadeIn .4s ease-out" }}>
+            {it.kind === "live" && <span className="inline-block w-1.5 h-1.5 rounded-full bg-rose-500 mr-1.5 align-middle" style={{ animation: "hrbBlink 1.2s infinite" }} />}{it.head}
+          </span>
+          <span className="block overflow-hidden whitespace-nowrap text-[11px] text-slate-200">
+            <span key={"d" + i} className="inline-block" style={scrolling ? { animation: `hrbMarquee ${Math.max(10, it.text.length / 5)}s linear infinite`, paddingLeft: "100%" } : undefined}>{it.text}</span>
+          </span>
+        </button>
+        <span className={"w-1 shrink-0 " + tone} />
+      </div>
+      <style>{`@keyframes hrbMarquee { 0% { transform: translateX(0) } 100% { transform: translateX(-100%) } } @keyframes hrbFadeIn { from { opacity: 0; transform: translateY(4px) } to { opacity: 1; transform: none } } @keyframes hrbBlink { 0%,100% { opacity: 1 } 50% { opacity: .2 } }`}</style>
     </div>
   );
 }
@@ -4519,6 +4561,14 @@ export default function App() {
   const [players, setPlayers] = useState(null);
   const [teams, setTeams] = useState([]);
   const [stand, setStand] = useState(null); // records + stat ranks from /api/standings
+  const [tickerSb, setTickerSb] = useState(null);   // this week's slate for the news ticker
+  useEffect(() => {
+    let alive = true;
+    const load = () => fetch("/api/scoreboard").then((r) => r.json()).then((d) => { if (alive && d && d.games) setTickerSb(d); }).catch(() => {});
+    load();
+    const t = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
   const [nflWeek, setNflWeek] = useState(null);
   const [, setInjEspnTick] = useState(0); // current week, for the bottom-nav label
   const [seasonStats, setSeasonStats] = useState(null); // ESPN box-score aggregation (/api/season-stats)
@@ -4703,7 +4753,7 @@ export default function App() {
           onBack={jumpBack ? () => { setTab(jumpBack.tab); setSelTeam(jumpBack.selTeam); setSel(jumpBack.sel); setJumpBack(null); } : undefined} />}
       </div>
 
-      {players && <NewsTicker players={players} onSelect={setSel} />}
+      {players && <NewsTicker players={players} onSelect={setSel} games={tickerSb && tickerSb.games} week={tickerSb && tickerSb.week} />}
       <div className="fixed bottom-0 inset-x-0 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex pb-[env(safe-area-inset-bottom)] z-20">
         {TABS.map((t) => (
           <button
