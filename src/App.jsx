@@ -3215,6 +3215,8 @@ function TdBoardTab({ players, teams, onSelect, navTick, seasonStats }) {
   // Cheat Sheet numbers freeze for the whole week: they use games through the
   // previous week only, so a 1pm game can't change a 4pm team's ranks.
   const [locked, setLocked] = useState(null);
+  const [thr, setThr] = useSticky("cheat.thr", 80);         // hit-rate threshold for the prop boxes
+  const [cheatTeam, setCheatTeam] = useSticky("cheat.team", "");
   const [board, setBoard] = useState(null);
   const [sb, setSb] = useState(null);
   const [seg, setSeg] = useSticky("week.seg", "matchups");
@@ -3333,83 +3335,114 @@ function TdBoardTab({ players, teams, onSelect, navTick, seasonStats }) {
           const GOOD = "bg-emerald-500 text-white", LEAN = "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300";
           const BAD = "bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-300";
           const NEU = "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300";
-          const rankTone = (r) => r == null ? "text-slate-400" : r <= 10 ? "text-emerald-600 dark:text-emerald-400" : r >= soft ? "text-rose-600 dark:text-rose-400" : "text-amber-600 dark:text-amber-400";
           const lastName = (nm) => { const parts = String(nm).split(" "); return /^(jr\.?|sr\.?|ii|iii|iv|v)$/i.test(parts[parts.length - 1] || "") ? parts.slice(-2).join(" ") : parts.slice(-1)[0]; };
           const identity = (o) => { const r = o && o.rank.passRate; return r == null ? "—" : r <= 8 ? "Pass-heavy" : r >= n - 7 ? "Run-heavy" : "Balanced"; };
-          // One verdict per team: this offense's lean vs. that defense's weak side.
+          // Matchup read: what this offense leans on vs. where the other defence is soft.
           const verdict = (o, d) => {
-            if (!o || !d) return { tag: "Even", cls: NEU, good: false, why: "Not enough data yet.", show: "both" };
+            if (!o || !d) return { tag: "Even", cls: NEU, good: false, note: "Not enough data yet." };
             const lean = identity(o), opp = d.abbr;
             const runSoft = d.rank.defRushYds >= soft, passSoft = d.rank.defPassYds >= soft;
             const runStout = d.rank.defRushYds <= 10, passStout = d.rank.defPassYds <= 10;
-            if (lean === "Run-heavy" && runSoft) return { tag: "Good spot", cls: GOOD, good: true, why: `They run a lot and ${opp} is soft against the run (${ordinal(d.rank.defRushYds)}).`, show: "run" };
-            if (lean === "Pass-heavy" && passSoft) return { tag: "Good spot", cls: GOOD, good: true, why: `They throw a lot and ${opp} is soft against the pass (${ordinal(d.rank.defPassYds)}).`, show: "pass" };
-            if (runSoft && passSoft) return { tag: "Good spot", cls: GOOD, good: true, why: `${opp} is soft against both the run and the pass.`, show: "both" };
-            if (lean === "Run-heavy" && runStout) return { tag: "Tough spot", cls: BAD, good: false, why: `They run a lot but ${opp} is stout against the run (${ordinal(d.rank.defRushYds)}).`, show: "pass" };
-            if (lean === "Pass-heavy" && passStout) return { tag: "Tough spot", cls: BAD, good: false, why: `They throw a lot but ${opp} is stout against the pass (${ordinal(d.rank.defPassYds)}).`, show: "run" };
-            if (runStout && passStout) return { tag: "Tough spot", cls: BAD, good: false, why: `${opp} is top 10 against both the run and the pass.`, show: "both" };
-            if (runSoft) return { tag: "Lean run", cls: LEAN, good: false, why: `${opp} is soft against the run (${ordinal(d.rank.defRushYds)}); the ground game is the opening.`, show: "run" };
-            if (passSoft) return { tag: "Lean pass", cls: LEAN, good: false, why: `${opp} is soft against the pass (${ordinal(d.rank.defPassYds)}); the air is the opening.`, show: "pass" };
-            return { tag: "Even", cls: NEU, good: false, why: `${opp}'s defense has no obvious weak side.`, show: "both" };
+            const dNote = runSoft && passSoft ? `${opp} is soft vs run AND pass` : runSoft ? `${opp} is soft vs the run (${ordinal(d.rank.defRushYds)})` : passSoft ? `${opp} is soft vs the pass (${ordinal(d.rank.defPassYds)})`
+              : runStout && passStout ? `${opp} is stout vs run AND pass` : runStout ? `${opp} is stout vs the run (${ordinal(d.rank.defRushYds)})` : passStout ? `${opp} is stout vs the pass (${ordinal(d.rank.defPassYds)})` : `${opp} has no clear weak side`;
+            if ((lean === "Run-heavy" && runSoft) || (lean === "Pass-heavy" && passSoft) || (runSoft && passSoft)) return { tag: "Good spot", cls: GOOD, good: true, note: dNote };
+            if ((lean === "Run-heavy" && runStout) || (lean === "Pass-heavy" && passStout) || (runStout && passStout)) return { tag: "Tough spot", cls: BAD, good: false, note: dNote };
+            if (runSoft) return { tag: "Lean run", cls: LEAN, good: false, note: dNote };
+            if (passSoft) return { tag: "Lean pass", cls: LEAN, good: false, note: dNote };
+            return { tag: "Even", cls: NEU, good: false, note: dNote };
           };
-          const who = (list, unit) => list && list.length ? (
-            <div className="text-[11px] text-slate-600 dark:text-slate-300">
-              <span className="font-extrabold text-slate-400 text-[9px] uppercase tracking-wider mr-1.5">{unit}</span>
-              {list.map(({ p, pct }, i) => (
-                <span key={p.id}>{i ? " · " : ""}<button onClick={() => { const full = players.find((x) => x.name === p.name); if (full) onSelect(full); }} className="font-bold text-slate-800 dark:text-white">{lastName(p.name)}</button> {pct}%</span>
-              ))}
-            </div>
-          ) : null;
-          const TeamLine = ({ t, opp }) => {
-            const o = rowOf(t.abbr), d = rowOf(opp.abbr);
-            const v = verdict(o, d);
-            const key = "cheat.open." + t.abbr;
-            const open = !!STICKY[key];
-            const [, bump] = useState(0);
+          // ── Consistency: the highest line a player has cleared in ≥ thr of his games ──
+          const COLS = [["tgt", "Tgt", 1, 15, 1], ["rec", "Rec", 1, 12, 1], ["recYds", "Rec Yds", 10, 150, 5], ["rushYds", "Rush Yds", 10, 150, 5]];
+          const MIN_G = 3;
+          const lineFor = (games, key, lo, hi, step) => {
+            if (games.length < MIN_G) return null;
+            let best = null;
+            for (let L = lo; L <= hi; L += step) {
+              const hits = games.filter((g) => (g[key] || 0) >= L).length, rate = hits / games.length;
+              if (rate >= thr / 100) best = { L, pct: Math.round(rate * 100) }; else break;
+            }
+            return best;
+          };
+          const skill = (abbr) => Object.values((stats && stats.players) || {})
+            .filter((P) => injTeamEq(P.team, abbr) && ["RB", "WR", "TE"].includes(String(P.pos || "").toUpperCase()) && P.games.length >= MIN_G)
+            .map((P) => { const inj = injFor(P.name, abbr); return { P, inj, out: !!(inj && injIsOut(inj)), vol: (P.totals.tgt || 0) + (P.totals.car || 0) }; })
+            .filter((x) => !x.out)
+            .sort((a, b) => b.vol - a.vol).slice(0, 5);
+          const Box = ({ hit }) => hit ? (
+            <span className={"flex flex-col items-center justify-center rounded-lg h-11 leading-none " + (hit.pct >= 90 ? "bg-emerald-500 text-white" : "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-300")}>
+              <span className="text-[13px] font-black tabular-nums">{hit.L}+</span><span className="text-[9px] font-bold mt-0.5">{hit.pct}%</span>
+            </span>
+          ) : <span className="flex items-center justify-center rounded-lg h-11 bg-slate-100 dark:bg-slate-800 text-slate-300 dark:text-slate-600 font-black">—</span>;
+          const TeamBlock = ({ t, opp }) => {
+            const o = rowOf(t.abbr), d = rowOf(opp.abbr), v = verdict(o, d);
+            const list = skill(t.abbr);
             return (
-              <div className={v.good ? "bg-emerald-50 dark:bg-emerald-500/10 -mx-3 px-3" : ""}>
-                <button onClick={() => { STICKY[key] = !open; bump((x) => x + 1); }} className="w-full flex items-center gap-2.5 py-2.5 text-left">
+              <div className={v.good ? "bg-emerald-50 dark:bg-emerald-500/10" : ""}>
+                <div className="flex items-center gap-2.5 px-3 pt-2.5 pb-1.5">
                   <img src={t.logo || TEAM_LOGOS[t.abbr]} alt="" className="w-7 h-7 object-contain shrink-0" />
                   <div className="min-w-0 flex-1">
                     <div className="text-[13px] font-black text-slate-900 dark:text-white">{t.abbr} <span className="text-slate-400 font-bold">· {identity(o)}{o ? " · " + Math.round(o.val.passRate) + "% pass" : ""}</span></div>
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">{v.note}</div>
                   </div>
                   <span className={"rounded-full px-2.5 py-1 text-[10px] font-extrabold whitespace-nowrap " + v.cls}>{v.tag}</span>
-                  <span className={"text-slate-300 text-[10px] transition-transform " + (open ? "rotate-180" : "")}>▼</span>
-                </button>
-                {open && o && (
-                  <div className="pl-[2.375rem] pb-3 space-y-1.5">
-                    <div className="text-[11px] text-slate-600 dark:text-slate-300">{v.why}</div>
-                    <div className="flex gap-4 text-[11px]">
-                      <span><span className="font-extrabold text-slate-400 text-[9px] uppercase tracking-wider mr-1">Scores</span><span className={"font-black tabular-nums " + rankTone(o.rank.ppg)}>{o.val.ppg.toFixed(1)}</span> <span className="text-slate-400">({ordinal(o.rank.ppg)})</span></span>
-                      <span><span className="font-extrabold text-slate-400 text-[9px] uppercase tracking-wider mr-1">Allows</span><span className={"font-black tabular-nums " + rankTone(o.rank.papg)}>{o.val.papg.toFixed(1)}</span> <span className="text-slate-400">({ordinal(o.rank.papg)})</span></span>
-                    </div>
-                    {(v.show === "run" || v.show === "both") && who(o.carriers, "Carries")}
-                    {(v.show === "pass" || v.show === "both") && who(o.targets, "Targets")}
-                  </div>
-                )}
+                </div>
+                <div className="grid grid-cols-[1fr_repeat(4,3.1rem)] gap-1 px-3 pb-1 text-[8px] font-extrabold tracking-widest uppercase text-slate-400">
+                  <span>Player</span>{COLS.map((c) => <span key={c[0]} className="text-center">{c[1]}</span>)}
+                </div>
+                {list.length === 0 && <div className="px-3 pb-3 text-[10px] text-slate-400">No player with {MIN_G}+ games yet.</div>}
+                {list.map(({ P, inj }) => {
+                  const st = inj && inj.injury_status ? String(inj.injury_status).toUpperCase() : null;
+                  return (
+                    <button key={P.id} onClick={() => { const full = players.find((x) => x.name === P.name); if (full) onSelect(full); }}
+                      className="w-full grid grid-cols-[1fr_repeat(4,3.1rem)] gap-1 items-center px-3 py-1.5 border-t border-slate-100 dark:border-slate-800 text-left">
+                      <span className="min-w-0">
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-[12px] font-black text-slate-900 dark:text-white truncate">{lastName(P.name)}</span>
+                          {st && <span className={"shrink-0 rounded px-1 py-px text-[7px] font-extrabold " + (st === "QUESTIONABLE" ? "bg-amber-500/20 text-amber-500" : "bg-rose-500/20 text-rose-500")}>{st.slice(0, 1)}</span>}
+                        </span>
+                        <span className="block text-[9px] font-semibold text-slate-400">{P.pos} · {P.games.length} gm · {(P.totals.tgt || 0)} tgt · {(P.totals.car || 0)} car</span>
+                      </span>
+                      {COLS.map(([k, , lo, hi, step]) => <Box key={k} hit={lineFor(P.games, k, lo, hi, step)} />)}
+                    </button>
+                  );
+                })}
               </div>
             );
           };
+          const teamsPlaying = sb.games.flatMap((g) => [g.away.abbr, g.home.abbr]);
+          const games = sb.games.filter((g) => !cheatTeam || g.away.abbr === cheatTeam || g.home.abbr === cheatTeam);
           const goodCount = sb.games.reduce((a, g) => a + (verdict(rowOf(g.away.abbr), rowOf(g.home.abbr)).good ? 1 : 0) + (verdict(rowOf(g.home.abbr), rowOf(g.away.abbr)).good ? 1 : 0), 0);
           return (
             <>
-              <div className="flex items-center justify-between px-1 mb-2 text-[10px] font-semibold text-slate-400">
-                <span>How each offense lines up vs the other defense. Tap a team for the why.{locked ? ` Locked: through Week ${(sb.week || 1) - 1}.` : ""}</span>
-                <span className="shrink-0 ml-2"><span className={"rounded-full px-2 py-0.5 text-white font-extrabold " + GOOD}>{goodCount}</span> good spots</span>
+              <div className="flex items-center justify-between px-1 mb-2">
+                <span className="text-[12px] font-extrabold tracking-widest uppercase text-slate-900 dark:text-white">Props by team</span>
+                <span className="flex items-center gap-1.5 text-[10px] font-semibold text-slate-400">hits at least
+                  {[70, 80].map((v) => <button key={v} onClick={() => setThr(v)} className={"rounded-full px-2.5 py-1 text-[11px] font-extrabold " + (thr === v ? "bg-white text-slate-900 shadow dark:bg-white" : "bg-slate-200/70 dark:bg-slate-800 text-slate-500")}>{v}%</button>)}
+                </span>
               </div>
-              {gamesByDay.map((grp) => (
-                <div key={grp.key} className="mb-4">
-                  {!grp.live && <div className="text-[10px] font-semibold tracking-widest uppercase mb-1.5 text-slate-400">{grp.key}</div>}
-                  <div className="space-y-2">
-                    {grp.games.map((g) => (
-                      <div key={g.id} className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm px-3 py-1 divide-y divide-dashed divide-slate-100 dark:divide-slate-800 overflow-hidden">
-                        <TeamLine t={g.away} opp={g.home} />
-                        <TeamLine t={g.home} opp={g.away} />
-                      </div>
-                    ))}
+              <div className="flex gap-1.5 overflow-x-auto pb-2 -mx-4 px-4 no-scrollbar">
+                {[["", "All teams"], ...teamsPlaying.map((a) => [a, a])].map(([k, lbl]) => (
+                  <button key={k || "all"} onClick={() => setCheatTeam(k)} className={"shrink-0 rounded-full px-3 py-1.5 text-[11px] font-extrabold " + (cheatTeam === k ? "bg-blue-600 text-white" : "bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300")}>{lbl}</button>
+                ))}
+              </div>
+              <div className="px-1 mb-3 text-[10px] font-semibold text-slate-400">Each box is the highest line the player has cleared in at least {thr}% of his games{locked ? ` through Week ${(sb.week || 1) - 1}` : " this season"}. A dash means no line clears {thr}%. Green row = good spot ({goodCount} this week). Tap a player for his game log.</div>
+              {gamesByDay.map((grp) => {
+                const gs = grp.games.filter((g) => games.includes(g));
+                if (!gs.length) return null;
+                return (
+                  <div key={grp.key} className="mb-4">
+                    {!grp.live && <div className="text-[10px] font-semibold tracking-widest uppercase mb-1.5 text-slate-400">{grp.key}</div>}
+                    <div className="space-y-3">
+                      {gs.map((g) => (
+                        <div key={g.id} className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden divide-y-2 divide-slate-100 dark:divide-slate-800">
+                          <TeamBlock t={g.away} opp={g.home} />
+                          <TeamBlock t={g.home} opp={g.away} />
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </>
           );
         })() : seg === "matchups" ? (
