@@ -3216,6 +3216,7 @@ function TdBoardTab({ players, teams, onSelect, navTick, seasonStats }) {
   // previous week only, so a 1pm game can't change a 4pm team's ranks.
   const [locked, setLocked] = useState(null);
   const [thr, setThr] = useSticky("cheat.thr", 80);         // hit-rate threshold for the prop boxes
+  const [rz, setRz] = useState(null);                         // red-zone usage (/api/redzone), same lock week
   const [cheatTeam, setCheatTeam] = useSticky("cheat.team", "");
   const [board, setBoard] = useState(null);
   const [sb, setSb] = useState(null);
@@ -3254,6 +3255,10 @@ function TdBoardTab({ players, teams, onSelect, navTick, seasonStats }) {
     if (wk <= 1) { setLocked(null); return; }   // week 1: nothing to lock to, use what's there
     fetch(`/api/season-stats?season=${yr}&through=${wk - 1}`).then((r) => r.json())
       .then((d) => { if (d && d.players) { LOCKED_STATS[key] = d; setLocked(d); } })
+      .catch(() => {});
+    if (LOCKED_STATS["rz:" + key]) setRz(LOCKED_STATS["rz:" + key]);
+    else fetch(`/api/redzone?season=${yr}&through=${wk - 1}`).then((r) => r.json())
+      .then((d) => { if (d && d.players) { LOCKED_STATS["rz:" + key] = d; setRz(d); } })
       .catch(() => {});
   }, [sb, nextSb]);
   useEffect(() => {
@@ -3345,24 +3350,45 @@ function TdBoardTab({ players, teams, onSelect, navTick, seasonStats }) {
             const runStout = d.rank.defRushYds <= 10, passStout = d.rank.defPassYds <= 10;
             const dNote = runSoft && passSoft ? `${opp} is soft vs run AND pass` : runSoft ? `${opp} is soft vs the run (${ordinal(d.rank.defRushYds)})` : passSoft ? `${opp} is soft vs the pass (${ordinal(d.rank.defPassYds)})`
               : runStout && passStout ? `${opp} is stout vs run AND pass` : runStout ? `${opp} is stout vs the run (${ordinal(d.rank.defRushYds)})` : passStout ? `${opp} is stout vs the pass (${ordinal(d.rank.defPassYds)})` : `${opp} has no clear weak side`;
-            if ((lean === "Run-heavy" && runSoft) || (lean === "Pass-heavy" && passSoft) || (runSoft && passSoft)) return { tag: "Good spot", cls: GOOD, good: true, note: dNote };
-            if ((lean === "Run-heavy" && runStout) || (lean === "Pass-heavy" && passStout) || (runStout && passStout)) return { tag: "Tough spot", cls: BAD, good: false, note: dNote };
-            if (runSoft) return { tag: "Lean run", cls: LEAN, good: false, note: dNote };
-            if (passSoft) return { tag: "Lean pass", cls: LEAN, good: false, note: dNote };
-            return { tag: "Even", cls: NEU, good: false, note: dNote };
+            const noteCls = runSoft || passSoft ? "text-emerald-600 dark:text-emerald-400" : runStout || passStout ? "text-rose-600 dark:text-rose-400" : "text-slate-500 dark:text-slate-400";
+            const R = (x) => ({ ...x, noteCls });
+            if ((lean === "Run-heavy" && runSoft) || (lean === "Pass-heavy" && passSoft) || (runSoft && passSoft)) return R({ tag: "Good spot", cls: GOOD, good: true, note: dNote });
+            if ((lean === "Run-heavy" && runStout) || (lean === "Pass-heavy" && passStout) || (runStout && passStout)) return R({ tag: "Tough spot", cls: BAD, good: false, note: dNote });
+            if (runSoft) return R({ tag: "Lean run", cls: LEAN, good: false, note: dNote });
+            if (passSoft) return R({ tag: "Lean pass", cls: LEAN, good: false, note: dNote });
+            return R({ tag: "Even", cls: NEU, good: false, note: dNote });
           };
           // ── Consistency: the highest line a player has cleared in ≥ thr of his games ──
-          const COLS = [["tgt", "Tgt", 1, 15, 1], ["rec", "Rec", 1, 12, 1], ["recYds", "Rec Yds", 10, 150, 5], ["rushYds", "Rush Yds", 10, 150, 5]];
+          // [key, label, lowest line tried, highest, step, FLOOR]. The floor is the
+          // "is this even a bet" knob: a line under it (3 carries for a bell-cow
+          // back, 1 target for a WR1) is a gimme, so it shows a dash instead.
+          const COLS = [["tgt", "Tgt", 1, 15, 1, 4], ["rec", "Rec", 1, 12, 1, 3], ["recYds", "Rec Yds", 10, 150, 5, 30], ["rushYds", "Rush Yds", 10, 150, 5, 30], ["td", "Any TD", 1, 3, 1, 1]];
           const MIN_G = 3;
-          const lineFor = (games, key, lo, hi, step) => {
+          const statOf = (g, key) => key === "td" ? (g.recTd || 0) + (g.rushTd || 0) : (g[key] || 0);
+          const lineFor = (games, key, lo, hi, step, floor) => {
             if (games.length < MIN_G) return null;
             let best = null;
             for (let L = lo; L <= hi; L += step) {
-              const hits = games.filter((g) => (g[key] || 0) >= L).length, rate = hits / games.length;
+              const hits = games.filter((g) => statOf(g, key) >= L).length, rate = hits / games.length;
               if (rate >= thr / 100) best = { L, pct: Math.round(rate * 100) }; else break;
             }
-            return best;
+            return best && best.L >= floor ? best : null;
           };
+          const avgOf = (games, key) => games.length ? games.reduce((a, g) => a + statOf(g, key), 0) / games.length : 0;
+          const rzOf = (P, inj, abbr) => {
+            if (!rz || !rz.players) return null;
+            if (inj && inj.gsis_id && rz.players[inj.gsis_id]) return rz.players[inj.gsis_id];
+            const parts = String(P.name).replace(/\s+(jr|sr|ii|iii|iv|v)\.?$/i, "").split(" ");
+            const want = (parts[0][0] + "." + parts.slice(1).join(" ")).toLowerCase().replace(/[.'’-]/g, (m) => (m === "." ? "." : ""));
+            return Object.values(rz.players).find((q) => injTeamEq(q.team, abbr) && String(q.name).toLowerCase().replace(/['’-]/g, "") === want) || null;
+          };
+          // Red-zone boxes: totals, with the share of the team's red-zone looks underneath
+          const rzTeam = (abbr) => { let t = 0, c = 0; for (const q of Object.values((rz && rz.players) || {})) if (injTeamEq(q.team, abbr)) for (const w of Object.values(q.weeks)) { t += w.rzTgt; c += w.rzCar; } return { t, c }; };
+          const RzBox = ({ n, share, hot }) => n == null ? <span className="flex items-center justify-center rounded-lg h-11 bg-slate-100 dark:bg-slate-800 text-slate-300 dark:text-slate-600 font-black">—</span> : (
+            <span className={"flex flex-col items-center justify-center rounded-lg h-11 leading-none " + (hot ? "bg-amber-400 text-slate-900" : n > 0 ? "bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-300" : "bg-slate-100 dark:bg-slate-800 text-slate-400")}>
+              <span className="text-[13px] font-black tabular-nums">{n}</span><span className="text-[9px] font-bold mt-0.5">{share != null ? share + "%" : ""}</span>
+            </span>
+          );
           const skill = (abbr) => Object.values((stats && stats.players) || {})
             .filter((P) => injTeamEq(P.team, abbr) && ["RB", "WR", "TE"].includes(String(P.pos || "").toUpperCase()) && P.games.length >= MIN_G)
             .map((P) => { const inj = injFor(P.name, abbr); return { P, inj, out: !!(inj && injIsOut(inj)), vol: (P.totals.tgt || 0) + (P.totals.car || 0) }; })
@@ -3370,7 +3396,7 @@ function TdBoardTab({ players, teams, onSelect, navTick, seasonStats }) {
             .sort((a, b) => b.vol - a.vol).slice(0, 5);
           const Box = ({ hit }) => hit ? (
             <span className={"flex flex-col items-center justify-center rounded-lg h-11 leading-none " + (hit.pct >= 90 ? "bg-emerald-500 text-white" : "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-300")}>
-              <span className="text-[13px] font-black tabular-nums">{hit.L}+</span><span className="text-[9px] font-bold mt-0.5">{hit.pct}%</span>
+              <span className="text-[12px] font-black tabular-nums">{hit.L}+</span><span className="text-[9px] font-bold mt-0.5">{hit.pct}%</span>
             </span>
           ) : <span className="flex items-center justify-center rounded-lg h-11 bg-slate-100 dark:bg-slate-800 text-slate-300 dark:text-slate-600 font-black">—</span>;
           const TeamBlock = ({ t, opp }) => {
@@ -3382,27 +3408,46 @@ function TdBoardTab({ players, teams, onSelect, navTick, seasonStats }) {
                   <img src={t.logo || TEAM_LOGOS[t.abbr]} alt="" className="w-7 h-7 object-contain shrink-0" />
                   <div className="min-w-0 flex-1">
                     <div className="text-[13px] font-black text-slate-900 dark:text-white">{t.abbr} <span className="text-slate-400 font-bold">· {identity(o)}{o ? " · " + Math.round(o.val.passRate) + "% pass" : ""}</span></div>
-                    <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">{v.note}</div>
+                    <div className={"text-[10px] font-semibold truncate " + (v.noteCls || "text-slate-500 dark:text-slate-400")}>{v.note}</div>
                   </div>
                   <span className={"rounded-full px-2.5 py-1 text-[10px] font-extrabold whitespace-nowrap " + v.cls}>{v.tag}</span>
                 </div>
-                <div className="grid grid-cols-[1fr_repeat(4,3.1rem)] gap-1 px-3 pb-1 text-[8px] font-extrabold tracking-widest uppercase text-slate-400">
+                <div className="grid grid-cols-[1fr_repeat(5,2.35rem)] gap-1 px-3 pb-1 text-[8px] font-extrabold tracking-widest uppercase text-slate-400">
                   <span>Player</span>{COLS.map((c) => <span key={c[0]} className="text-center">{c[1]}</span>)}
                 </div>
+                {rz && <div className="grid grid-cols-[1fr_repeat(5,2.35rem)] gap-1 px-3 pb-1 -mt-1 text-[8px] font-extrabold tracking-widest uppercase text-amber-500/80">
+                  <span /><span className="text-center">RZ Tgt</span><span className="text-center">EZ Tgt</span><span className="text-center">RZ Car</span><span className="text-center">GL Car</span><span />
+                </div>}
                 {list.length === 0 && <div className="px-3 pb-3 text-[10px] text-slate-400">No player with {MIN_G}+ games yet.</div>}
                 {list.map(({ P, inj }) => {
                   const st = inj && inj.injury_status ? String(inj.injury_status).toUpperCase() : null;
                   return (
                     <button key={P.id} onClick={() => { const full = players.find((x) => x.name === P.name); if (full) onSelect(full); }}
-                      className="w-full grid grid-cols-[1fr_repeat(4,3.1rem)] gap-1 items-center px-3 py-1.5 border-t border-slate-100 dark:border-slate-800 text-left">
+                      className="w-full grid grid-cols-[1fr_repeat(5,2.35rem)] gap-1 items-center px-3 py-1.5 border-t border-slate-100 dark:border-slate-800 text-left">
                       <span className="min-w-0">
                         <span className="flex items-center gap-1.5 min-w-0">
                           <span className="text-[12px] font-black text-slate-900 dark:text-white truncate">{lastName(P.name)}</span>
                           {st && <span className={"shrink-0 rounded px-1 py-px text-[7px] font-extrabold " + (st === "QUESTIONABLE" ? "bg-amber-500/20 text-amber-500" : "bg-rose-500/20 text-rose-500")}>{st.slice(0, 1)}</span>}
                         </span>
-                        <span className="block text-[9px] font-semibold text-slate-400">{P.pos} · {P.games.length} gm · {(P.totals.tgt || 0)} tgt · {(P.totals.car || 0)} car</span>
+                        <span className="block text-[9px] font-semibold text-slate-400">{P.pos} · {P.games.length} gm · avg {avgOf(P.games, "tgt").toFixed(1)} tgt · {avgOf(P.games, "car").toFixed(1)} car</span>
                       </span>
-                      {COLS.map(([k, , lo, hi, step]) => <Box key={k} hit={lineFor(P.games, k, lo, hi, step)} />)}
+                      {COLS.map(([k, , lo, hi, step, floor]) => <Box key={k} hit={lineFor(P.games, k, lo, hi, step, floor)} />)}
+                      {(() => {
+                        const r = rzOf(P, inj, t.abbr);
+                        if (!rz) return null;
+                        const tot = r ? Object.values(r.weeks).reduce((a, w) => ({ rzTgt: a.rzTgt + w.rzTgt, ezTgt: a.ezTgt + w.ezTgt, rzCar: a.rzCar + w.rzCar, glCar: a.glCar + w.glCar }), { rzTgt: 0, ezTgt: 0, rzCar: 0, glCar: 0 }) : null;
+                        const tm = rzTeam(t.abbr);
+                        const sh = (x, d) => d ? Math.round((x / d) * 100) : null;
+                        return (
+                          <span className="col-span-6 grid grid-cols-[1fr_repeat(5,2.35rem)] gap-1 items-center mt-1">
+                            <span className="text-[8px] font-extrabold tracking-widest uppercase text-slate-400">Red zone</span>
+                            <RzBox n={tot ? tot.rzTgt : null} share={tot ? sh(tot.rzTgt, tm.t) : null} hot={tot && tm.t && tot.rzTgt / tm.t >= 0.25} />
+                            <RzBox n={tot ? tot.ezTgt : null} share={null} hot={tot && tot.ezTgt >= 6} />
+                            <RzBox n={tot ? tot.rzCar : null} share={tot ? sh(tot.rzCar, tm.c) : null} hot={tot && tm.c && tot.rzCar / tm.c >= 0.4} />
+                            <RzBox n={tot ? tot.glCar : null} share={null} hot={tot && tot.glCar >= 8} /><span />
+                          </span>
+                        );
+                      })()}
                     </button>
                   );
                 })}
@@ -3425,7 +3470,7 @@ function TdBoardTab({ players, teams, onSelect, navTick, seasonStats }) {
                   <button key={k || "all"} onClick={() => setCheatTeam(k)} className={"shrink-0 rounded-full px-3 py-1.5 text-[11px] font-extrabold " + (cheatTeam === k ? "bg-blue-600 text-white" : "bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300")}>{lbl}</button>
                 ))}
               </div>
-              <div className="px-1 mb-3 text-[10px] font-semibold text-slate-400">Each box is the highest line the player has cleared in at least {thr}% of his games{locked ? ` through Week ${(sb.week || 1) - 1}` : " this season"}. A dash means no line clears {thr}%. Green row = good spot ({goodCount} this week). Tap a player for his game log.</div>
+              <div className="px-1 mb-3 text-[10px] font-semibold text-slate-400">Each box is the highest line the player has cleared in at least {thr}% of his games{locked ? ` through Week ${(sb.week || 1) - 1}` : " this season"}. A dash means no line clears {thr}%, or the only line that does is too low to matter (floors: 4 tgt · 3 rec · 30 yds · 1 TD). Green row = good spot ({goodCount} this week). Amber boxes are season red-zone looks (targets inside the 20, end-zone targets, carries inside the 20 and the 5) with the player's share of the team's; bright amber = he owns that role. Tap a player for his game log.</div>
               {gamesByDay.map((grp) => {
                 const gs = grp.games.filter((g) => games.includes(g));
                 if (!gs.length) return null;
