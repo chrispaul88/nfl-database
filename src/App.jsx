@@ -1592,12 +1592,18 @@ function injuryWire(players) {
     const a = toAbbr(teamOfPlayer(p) || p.teamName || "");
     const inj = injFor(p.name, a);
     const e = inj && inj.espn_id ? INJ_ESPN[String(inj.espn_id)] : null;
-    const status = (e && e.status && !/^(active|inactive)$/i.test(e.status)) ? e.status
+    let status = (e && e.status && !/^(active|inactive)$/i.test(e.status)) ? e.status
       : (inj && inj.injury_status) || (inj && /injured reserve/i.test(String(inj.status || "")) ? "IR" : "") || "";
-    if (!status) continue;
-    const d = injuryDetail(p, a);
     const rawWhen = (e && e.date) || (inj && inj.injury_start_date) || null;
     const when = rawWhen ? new Date(rawWhen) : null;
+    const ageDays = when && !isNaN(when) ? (Date.now() - when.getTime()) / 864e5 : null;
+    const cm = String((e && e.comment) || "");
+    // Reserve moves are news for a week; a player who's been sitting on IR
+    // since September is not. Activations off IR count as news too.
+    if (/activated|designated to return|return(ed)? from (the )?(injured )?reserve/i.test(cm) && (ageDays == null || ageDays <= 7)) status = "ACTIVATED";
+    else if (/^(ir|injured reserve|pup|nfi)$/i.test(status)) { if (ageDays == null || ageDays > 10) continue; status = "PLACED ON " + String(status).toUpperCase(); }
+    if (!status) continue;
+    const d = injuryDetail(p, a);
     const note = (e && e.comment && !/^\s*(inactive|active|out|questionable|doubtful|probable)\.?\s*$/i.test(e.comment)) ? e.comment : "";
     out.push({ p, a, status: String(status).toUpperCase(), injury: d ? d.label : (p.injuryNotes ? injCase(p.injuryNotes) : ""), note, ret: fmtReturn(p.estReturn || (e && e.returnDate) || null), when: when && !isNaN(when) ? when : null });
   }
@@ -1610,7 +1616,7 @@ function tickerItems(games, wire) {
   const posOf = (p) => String(p.pos || "").toUpperCase();
   const byTeam = {};
   for (const w of wire) (byTeam[w.a] ??= []).push(w);
-  const notes = (abbr) => (byTeam[abbr] || []).filter((w) => /out|ir|pup|doubt|quest|sus/i.test(w.status))
+  const notes = (abbr) => (byTeam[abbr] || []).filter((w) => /out|placed|activated|doubt|quest|sus/i.test(w.status))
     .map((w) => `${posOf(w.p)} ${w.p.name}${w.injury ? " (" + w.injury + ")" : ""} ${w.status}`);
   const out = [];
   for (const g of games) {
@@ -1634,18 +1640,22 @@ function NewsTicker({ players, onSelect, games, week }) {
   const items = useMemo(() => tickerItems(games || [], wire), [games, wire]);
   const [i, setI] = useState(0);
   const [paused, setPaused] = useState(false);
-  useEffect(() => {
-    if (!items.length || paused) return;
-    const t = setInterval(() => setI((n) => (n + 1) % items.length), 9000);
-    return () => clearInterval(t);
-  }, [items.length, paused]);
   if (!items.length) return null;
   const it = items[i % items.length];
   const tone = it.kind === "live" ? "bg-rose-600" : it.kind === "final" ? "bg-slate-500" : "bg-blue-600";
   const scrolling = it.text.length > 44;
+  // One full pass of the scrolling line, plus a beat, before the next item.
+  const marqueeSec = Math.max(10, it.text.length / 5);
+  const dwellMs = (scrolling ? marqueeSec + 1.5 : 6) * 1000;
+  useEffect(() => {
+    if (paused) return;
+    const t = setTimeout(() => setI((n) => (n + 1) % items.length), dwellMs);
+    return () => clearTimeout(t);
+  }, [i, items.length, paused, dwellMs]);
+  const tileLogo = (t) => { const bg = t.color || teamColorSafe(t.abbr); return (lumOf(bg) < 0.5 ? darkLogo(t.abbr) : null) || t.logo || TEAM_LOGOS[t.abbr]; };
   const onTap = () => {
     if (it.kind !== "notes") return;
-    const first = it.items.find((w) => /out|ir|pup|doubt|quest|sus/i.test(w.status));
+    const first = it.items.find((w) => /out|placed|activated|doubt|quest|sus/i.test(w.status));
     if (first) onSelect(first.p);
   };
   return (
@@ -1653,14 +1663,13 @@ function NewsTicker({ players, onSelect, games, week }) {
       onTouchStart={() => setPaused(true)} onTouchEnd={() => setPaused(false)}>
       <div className="flex items-stretch h-12">
         {/* WEEK block, bottom-left like the broadcast bar */}
-        <div className="shrink-0 w-14 flex flex-col items-center justify-center bg-[#15181f] border-r border-slate-800">
-          <span className="text-[8px] font-extrabold tracking-widest text-slate-300">WEEK {week || ""}</span>
-          <span className="text-[8px] text-slate-500 mt-0.5">{(i % items.length) + 1}/{items.length}</span>
+        <div className="shrink-0 w-14 flex items-center justify-center bg-[#15181f] border-r border-slate-800">
+          <span className="text-[9px] font-extrabold tracking-widest text-slate-300">WEEK {week || ""}</span>
         </div>
         {/* the two teams in this game, home side darker-tinted */}
         {[it.away, it.home].map((t, k) => (
-          <span key={k} className="shrink-0 w-11 flex items-center justify-center" style={{ backgroundColor: t.color || teamColorSafe(t.abbr) }}>
-            <img src={t.logo || TEAM_LOGOS[t.abbr]} alt="" className="w-7 h-7 object-contain" />
+          <span key={k} className="shrink-0 w-14 flex items-center justify-center" style={{ backgroundColor: t.color || teamColorSafe(t.abbr) }}>
+            <img src={tileLogo(t)} alt="" className="w-10 h-10 object-contain drop-shadow" onError={(e) => { const f = t.logo || TEAM_LOGOS[t.abbr]; if (f && e.currentTarget.src !== f) e.currentTarget.src = f; }} />
           </span>
         ))}
         <button onClick={onTap} className="min-w-0 flex-1 flex flex-col justify-center pl-2.5 pr-2 text-left">
@@ -1668,7 +1677,7 @@ function NewsTicker({ players, onSelect, games, week }) {
             {it.kind === "live" && <span className="inline-block w-1.5 h-1.5 rounded-full bg-rose-500 mr-1.5 align-middle" style={{ animation: "hrbBlink 1.2s infinite" }} />}{it.head}
           </span>
           <span className="block overflow-hidden whitespace-nowrap text-[11px] text-slate-200">
-            <span key={"d" + i} className="inline-block" style={scrolling ? { animation: `hrbMarquee ${Math.max(10, it.text.length / 5)}s linear infinite`, paddingLeft: "100%" } : undefined}>{it.text}</span>
+            <span key={"d" + i} className="inline-block" style={scrolling ? { animation: `hrbMarquee ${marqueeSec}s linear 1 forwards`, paddingLeft: "100%" } : undefined}>{it.text}</span>
           </span>
         </button>
         <span className={"w-1 shrink-0 " + tone} />
