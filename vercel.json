@@ -24,6 +24,10 @@
     },
     "api/td-log.js": {
       "maxDuration": 60
+    },
+    "api/redzone.js": {
+      "maxDuration": 60,
+      "memory": 1024
     }
   }
 }
