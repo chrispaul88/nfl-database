@@ -1044,7 +1044,7 @@ function FormationView({ roster, abbr, unit, setUnit, onSelectPlayer, lineRank, 
     const EDGE_BASES = new Set(["DE", "EDGE", "OLB", "CB", "S"]);
     // Strong side = the tight end's side, and the offense view draws the TE on
     // the right, so SAM lines up on the right and WILL on the left.
-    const LEFT_NAMES = new Set(["WILL", "WLB"]), RIGHT_NAMES = new Set(["SAM", "SLB"]);
+    const LEFT_NAMES = new Set(["WILL", "WLB", "FS"]), RIGHT_NAMES = new Set(["SAM", "SLB", "SS"]);   // strong safety on the strong side too
     // 0 = left edge · 1 = left interior · 2 = middle · 3 = right interior · 4 = right edge
     // So LDE · LDT · RDT · RDE lines up as a real front, not LDT · LDE · RDE · RDT.
     const sideKey = (b0, d) => {
@@ -1691,7 +1691,41 @@ function NewsTicker({ players, onSelect, games, week }) {
     </div>
   );
 }
-function InjuryFeed({ players, onSelect, q, setQ, pills, dark, since, embedded }) {
+// Roster moves (signed, waived, practice squad, IR/PUP) for every team, from
+// /api/injuries?tx=1. One fetch per session, refreshed after 15 minutes.
+const MOVES_CACHE = { at: 0, data: null, wait: null };
+function useMoves(on) {
+  const [d, setD] = useState(MOVES_CACHE.data);
+  useEffect(() => {
+    if (!on) return;
+    if (MOVES_CACHE.data && Date.now() - MOVES_CACHE.at < 9e5) { setD(MOVES_CACHE.data); return; }
+    let alive = true;
+    (MOVES_CACHE.wait ??= fetch("/api/injuries?tx=1").then((r) => r.json())
+      .then((x) => { MOVES_CACHE.wait = null; if (x && x.moves && Object.keys(x.moves).length) { MOVES_CACHE.data = x; MOVES_CACHE.at = Date.now(); return x; } return { moves: {}, error: (x && x.error) || "no moves returned" }; })
+      .catch((e) => { MOVES_CACHE.wait = null; return { moves: {}, error: String(e.message || e) }; }))
+      .then((x) => { if (alive) setD(x); });
+    return () => { alive = false; };
+  }, [on]);
+  return d;
+}
+// One short tag for a transaction line, and whether it's good or bad news.
+function moveTag(text) {
+  const t = String(text || "");
+  if (/injured reserve|reserve\/injured|\bIR\b/i.test(t) && /activated|designated (to|for) return|return(ed)? from/i.test(t)) return ["ACTIVATED", "good"];
+  if (/injured reserve|reserve\/injured/i.test(t)) return ["IR", "bad"];
+  if (/physically unable|\bPUP\b/i.test(t)) return ["PUP", "bad"];
+  if (/non-football|\bNFI\b/i.test(t)) return ["NFI", "bad"];
+  if (/suspend/i.test(t)) return ["SUSPENDED", "bad"];
+  if (/\btraded?\b|acquired/i.test(t)) return ["TRADE", "info"];
+  if (/waived|released|terminated|\bcut\b/i.test(t)) return [/practice squad/i.test(t) ? "PS RELEASED" : /waived/i.test(t) ? "WAIVED" : "RELEASED", "bad"];
+  if (/elevated|promoted|from (the )?practice squad/i.test(t)) return ["PS CALL-UP", "good"];
+  if (/practice squad/i.test(t)) return ["PRACTICE SQUAD", "info"];
+  if (/activated/i.test(t)) return ["ACTIVATED", "good"];
+  if (/claimed/i.test(t)) return ["CLAIMED", "good"];
+  if (/signed|re-signed|extension/i.test(t)) return ["SIGNED", "good"];
+  return ["ROSTER MOVE", "info"];
+}
+function InjuryFeed({ players, onSelect, q, setQ, pills, dark, since, embedded, moves, movesState, abbr }) {
   const rows = useMemo(() => {
     const out = [];
     for (const p of players) {
@@ -1713,8 +1747,15 @@ function InjuryFeed({ players, onSelect, q, setQ, pills, dark, since, embedded }
         ret: fmtReturn(ret),
       });
     }
-    return out.sort((x, y) => (y.when ? y.when.getTime() : 0) - (x.when ? x.when.getTime() : 0));
-  }, [players]);
+    // A team page passes its whole roster: keep only players with something to
+    // report, then fold the roster moves into the same dated list.
+    const list = embedded ? out.filter((r) => r.status || r.injury) : out;
+    for (const [i, m] of (moves || []).entries()) {
+      const when = new Date(m.date);
+      list.push({ move: true, id: "mv" + i, a: abbr, when: isNaN(when) ? null : when, text: m.text, tag: moveTag(m.text) });
+    }
+    return list.sort((x, y) => (y.when ? y.when.getTime() : 0) - (x.when ? x.when.getTime() : 0));
+  }, [players, moves, embedded, abbr]);
   const fmtDay = (d) => d.toLocaleDateString([], { month: "short", day: "numeric" });
   const fmtTime = (d) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   const statusCls = (st) => /out|ir|injured reserve|pup|nfi|sus|doubt/i.test(st) ? "bg-rose-600 text-white" : /quest/i.test(st) ? "bg-amber-400 text-slate-900" : "bg-slate-500 text-white";
@@ -1734,12 +1775,20 @@ function InjuryFeed({ players, onSelect, q, setQ, pills, dark, since, embedded }
             : INJ_META.count ? `ESPN feed · ${INJ_META.count} records${INJ_META.at ? " · " + INJ_META.at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""} · newest update first`
             : INJ_META.at ? "ESPN injury feed returned no records — dates and return dates come from it" : "Loading ESPN injury feed…"}
         </div>
-        {rows.length === 0 && <div className="text-center text-sm text-slate-400 py-12 px-6">No injuries reported right now.</div>}
+        {embedded && movesState && movesState !== "ok" && <div className={"text-[10px] font-semibold px-1 " + (movesState === "error" ? "text-rose-500" : "text-slate-400")}>{movesState === "error" ? "Roster moves feed returned nothing — showing injuries only." : "Loading roster moves…"}</div>}
+        {rows.length === 0 && <div className="text-center text-sm text-slate-400 py-12 px-6">{embedded ? "No injury or roster updates right now." : "No injuries reported right now."}</div>}
         {groups.map((g) => (
           <div key={g.key}>
             <div className="text-[10px] font-extrabold tracking-widest uppercase text-slate-400 mb-1.5 px-1">{g.key}</div>
             <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm divide-y divide-slate-100 dark:divide-slate-800 overflow-hidden">
-              {g.rows.map((r) => (
+              {g.rows.map((r) => r.move ? (
+                <div key={r.id} className="pr-3 pl-3 py-2.5" style={{ borderLeft: `3px solid ${teamInk(r.a, dark)}${dark ? "66" : "33"}` }}>
+                  <div className="flex items-start gap-2.5">
+                    <span className={"mt-0.5 shrink-0 text-[9px] font-extrabold uppercase rounded-full px-2 py-0.5 " + (r.tag[1] === "good" ? "bg-emerald-600 text-white" : r.tag[1] === "bad" ? "bg-rose-600 text-white" : "bg-slate-500 text-white")}>{r.tag[0]}</span>
+                    <span className="flex-1 min-w-0 text-[12px] leading-snug font-semibold text-slate-800 dark:text-slate-100">{r.text}</span>
+                  </div>
+                </div>
+              ) : (
                 <button key={r.p.id} onClick={() => onSelect(r.p)} className="w-full text-left pr-3 pl-3 py-2.5 active:bg-slate-50 dark:active:bg-slate-800"
                   style={{ borderLeft: `3px solid ${teamInk(r.a, dark)}${dark ? "66" : "33"}` }}>
                   <div className="flex items-start gap-2.5">
@@ -2642,6 +2691,13 @@ function TeamDetail({ team, teams, players, onBack, onSelectPlayer, seasonStats,
   const [seg, setSeg] = useState(remembered.seg || "roster");
   // Inside Roster: "list" (full roster), "offense" or "defense" (formation)
   const [rosterView, setRosterView] = useState(remembered.rosterView || "list");
+  // Roster moves load the first time the Updates pill is opened.
+  const movesAll = useMoves(rosterView === "injury");
+  const teamMoves = useMemo(() => {
+    const m = movesAll && movesAll.moves; if (!m) return [];
+    const k = Object.keys(m).find((x) => injTeamEq(x, abbr));
+    return k ? m[k] : [];
+  }, [movesAll, abbr]);
   useEffect(() => { TEAM_VIEW_MEMO[team.id] = { seg, rosterView }; }, [team.id, seg, rosterView]);
   const unit = rosterView === "list" || rosterView === "injury" ? null : rosterView;
   const lineRanks = useMemo(() => computeLineRanks(players, teams), [players, teams]);
@@ -2915,7 +2971,7 @@ function TeamDetail({ team, teams, players, onBack, onSelectPlayer, seasonStats,
 
         {seg === "roster" && (
           <div className="flex gap-2 mt-3">
-            {[["offense", "Offense"], ["defense", "Defense"], ["injury", "Injury Report"]].map(([k, lbl]) => (
+            {[["offense", "Offense"], ["defense", "Defense"], ["injury", "Updates"]].map(([k, lbl]) => (
               <button key={k} onClick={() => setRosterView(rosterView === k ? "list" : k)}
                 className={"flex-1 py-1.5 rounded-full text-[11px] font-extrabold transition-colors " + (rosterView === k
                   ? ""
@@ -2928,7 +2984,7 @@ function TeamDetail({ team, teams, players, onBack, onSelectPlayer, seasonStats,
         )}
         {seg === "roster" && unit && <FormationView roster={roster} abbr={abbr} unit={unit} onSelectPlayer={onSelectPlayer} lineRank={lineRanks[abbr]} team={team} />}
         {seg === "roster" && rosterView === "injury" && (
-          <InjuryFeed embedded players={rosterRaw} onSelect={onSelectPlayer} q="" setQ={() => {}} dark={dark} />
+          <InjuryFeed embedded players={rosterRaw} onSelect={onSelectPlayer} q="" setQ={() => {}} dark={dark} moves={teamMoves} movesState={movesAll ? (movesAll.error ? "error" : "ok") : "loading"} abbr={abbr} />
         )}
         {seg === "roster" && rosterView !== "injury" && !unit && orderedRoles.map((role) => (
           <div key={role}>
