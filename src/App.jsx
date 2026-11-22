@@ -3254,13 +3254,13 @@ function tapePlayers(stats, rz, through, abbr) {
   return { qb, catchers: catchers.map((x) => ({ ...x, tag: tagOf(x) })), backs: backs.map((x) => (x.asRunner ? x : { ...x, tag: tagOf(x) })) };
 }
 function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
-  const n = Object.keys(rows || {}).length || 32, soft = n - 9;
+  const n = Object.keys(rows || {}).length || 32, soft = n - 11;   // 21st or worse of 32
   const rowOf = (abbr) => { const k = Object.keys(rows || {}).find((x) => injTeamEq(x, abbr)); return k ? rows[k] : null; };
   const GOOD = "text-emerald-600 dark:text-emerald-400", BAD = "text-rose-600 dark:text-rose-400", MID = "text-slate-900 dark:text-white";
   const BAR_G = "bg-emerald-500", BAR_R = "bg-rose-500", BAR_N = "bg-slate-400 dark:bg-slate-500";
   const CHIP_G = "bg-emerald-500 text-white", CHIP_R = "bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-300", CHIP_N = "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300";
   // "good" always means good for the team WITH the ball: a top-10 offense, or
-  // a bottom-10 defense across from it.
+  // a defense ranked 21st or worse across from it. 11th-20th is neutral.
   const offGrade = (r) => (r == null ? 0 : r <= 10 ? 1 : r >= soft ? -1 : 0);
   const defGrade = (r) => (r == null ? 0 : r >= soft ? 1 : r <= 10 ? -1 : 0);
   const tone = (gr) => (gr > 0 ? GOOD : gr < 0 ? BAD : MID);
@@ -3361,15 +3361,19 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
     const runSpot = o && d ? offGrade(o.rank.offRushYds) + offGrade(o.rank.offRushTd) + dg.ry + dg.rt : 0;
     if (newQb) passSpot = Math.min(passSpot, 0);   // the team's passing numbers aren't his
     // who to look at: at most three names, from the side(s) with an edge
-    const names = [];
+    const runNames = [], passNames = [];
     const rzWork = (x) => (x.rz ? x.rz.rzTgt + x.rz.ezTgt + x.rz.rzCar + x.rz.glCar : 0);
-    if (who && runSpot >= 1) for (const b of who.backs.slice(0, 2)) if (b.asRunner ? b.rushTd >= 3 || b.car / b.n >= 6 : b.car / b.n >= 12 || b.rushTd + b.recTd >= 3) names.push(lastName(b));
+    if (who && runSpot >= 1) for (const b of who.backs.slice(0, 2)) if (b.asRunner ? b.rushTd >= 3 || b.car / b.n >= 6 : b.car / b.n >= 12 || b.rushTd + b.recTd >= 3) runNames.push(lastName(b));
     if (who && passSpot >= 1) {
-      if (who.qb && who.qb.passTd / who.qb.n >= 1.2 && !names.includes(lastName(who.qb))) names.push(lastName(who.qb));
-      for (const c of [...who.catchers].sort((a, b) => rzWork(b) - rzWork(a) || b.tgt / b.n - a.tgt / a.n)) if (names.length < 3 && (c.tgt / c.n >= 6 || c.recTd + c.rushTd >= 3 || c.tag)) names.push(lastName(c));
+      if (who.qb && who.qb.passTd / who.qb.n >= 1.2) passNames.push(lastName(who.qb));
+      for (const c of [...who.catchers].sort((a, b) => rzWork(b) - rzWork(a) || b.tgt / b.n - a.tgt / a.n)) if (passNames.length < 3 && (c.tgt / c.n >= 6 || c.recTd + c.rushTd >= 3 || c.tag)) passNames.push(lastName(c));
     }
-    const best = Math.max(runSpot, passSpot);
-    const which = runSpot >= 1 && passSpot >= 1 ? "run and pass" : runSpot >= 1 ? "run game" : "passing game";
+    // the stronger side's players come first; the headline only names the side(s)
+    // that actually earned the headline's grade
+    const names = [];
+    for (const x of (passSpot > runSpot ? [...passNames, ...runNames] : [...runNames, ...passNames])) if (names.length < 3 && !names.includes(x)) names.push(x);
+    const best = Math.max(runSpot, passSpot), bar = best >= 2 ? 2 : 1;
+    const which = runSpot >= bar && passSpot >= bar ? "run and pass" : runSpot >= bar ? "run game" : "passing game";
     const lean = best >= 2 ? "Good spot: " + which : best === 1 ? "Slight edge: " + which : runSpot <= -2 && passSpot <= -2 ? "Tough spot" : "No clear edge";
     const good = best >= 1;
     const base = off.color || teamColorSafe(off.abbr), l = lumOf(base || "#334155");
@@ -3426,7 +3430,7 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
       {side(g.away, g.home, vegas ? vegas.away : null, vegas ? -vegas.homeBy : 0)}
       {side(g.home, g.away, vegas ? vegas.home : null, vegas ? vegas.homeBy : 0)}
       <div className="px-3 py-2 text-[9px] leading-snug text-slate-400 border-t border-slate-100 dark:border-slate-800">
-        <span className={GOOD + " font-bold"}>Green</span> is good for the team with the ball (top-10 offense or bottom-10 defense), <span className={BAD + " font-bold"}>red</span> is bad. Good spot = at least two more green numbers than red on that side's two rows. Defense ranks: (1st) allows the fewest. RZ = inside the 20 · EZ = thrown into the end zone · GL = inside the 5.{through ? ` Through Week ${through}.` : ""}{rz ? "" : " Red-zone data is still loading."}
+        <span className={GOOD + " font-bold"}>Green</span> is good for the team with the ball (offense ranked 1st–10th, or defense ranked 21st–32nd), <span className={BAD + " font-bold"}>red</span> is the reverse, and gray is the middle (11th–20th). Good spot = at least two more green numbers than red on that side's two rows. Defense ranks: (1st) allows the fewest. RZ = inside the 20 · EZ = thrown into the end zone · GL = inside the 5.{through ? ` Through Week ${through}.` : ""}{rz ? "" : " Red-zone data is still loading."}
       </div>
     </div>
   );
