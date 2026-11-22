@@ -3148,7 +3148,7 @@ function rzSum(q, through) {
   return t;
 }
 
-// ═══════════════ TALE OF THE TAPE ═════════════════════════════════
+// ═══════════════ MATCHUP BREAKDOWN ════════════════════════════════
 // Team profile for the matchup dropdown: every board rank a team needs,
 // keyed by abbreviation. Ranks come from the same boards as the Stats tab.
 const TAPE_KEYS = ["passRate", "passAtt", "rushAtt", "ppg", "papg", "offPassYds", "offPassTd", "offRushYds", "offRushTd", "defPassYds", "defPassTd", "defRushYds", "defRushTd"];
@@ -3196,21 +3196,31 @@ function tapePlayers(stats, rz, through, abbr) {
   const backs = skill.filter((x) => x.car >= 5 && x.n >= minG && isBack(x)).sort((a, b) => b.car / b.n - a.car / a.n).slice(0, 1);
   const glLead = skill.filter((x) => isBack(x) && x.rz && x.rz.glCar >= 3).sort((a, b) => b.rz.glCar - a.rz.glCar || b.car - a.car)[0];
   if (glLead && !backs.some((b) => b.P === glLead.P)) backs.push({ ...glLead, tag: "GL back" });
+  // A quarterback who runs (Allen, Hurts, Jackson) is part of the run game:
+  // 4+ carries a game, or 3+ rushing TDs. Slots in right behind the lead back.
+  if (qb && (qb.car / qb.n >= 4 || qb.rushTd >= 3)) backs.splice(Math.min(1, backs.length), 0, { ...qb, asRunner: true });
   return { qb, catchers, backs };
 }
-function TaleOfTape({ g, rows, stats, rz, through, players, onSelect }) {
+function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
   const n = Object.keys(rows || {}).length || 32, soft = n - 9;
   const rowOf = (abbr) => { const k = Object.keys(rows || {}).find((x) => injTeamEq(x, abbr)); return k ? rows[k] : null; };
   const GOOD = "text-emerald-600 dark:text-emerald-400", BAD = "text-rose-600 dark:text-rose-400", MID = "text-slate-900 dark:text-white";
+  const BAR_G = "bg-emerald-500", BAR_R = "bg-rose-500", BAR_N = "bg-slate-400 dark:bg-slate-500";
   const CHIP_G = "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300";
   const CHIP_R = "bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-300";
   const CHIP_N = "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300";
-  // green = good for the team with the ball: a top-10 offense, or a bottom-10 defense across from it
-  const offTone = (r) => (r == null ? MID : r <= 10 ? GOOD : r >= soft ? BAD : MID);
-  const defTone = (r) => (r == null ? MID : r >= soft ? GOOD : r <= 10 ? BAD : MID);
-  const ord = (r) => (r == null ? "—" : ordinal(r));
+  // "good" always means good for the team WITH the ball: a top-10 offense, or
+  // a bottom-10 defense across from it.
+  const offGrade = (r) => (r == null ? 0 : r <= 10 ? 1 : r >= soft ? -1 : 0);
+  const defGrade = (r) => (r == null ? 0 : r >= soft ? 1 : r <= 10 ? -1 : 0);
+  const tone = (gr) => (gr > 0 ? GOOD : gr < 0 ? BAD : MID);
+  const bar = (gr) => (gr > 0 ? BAR_G : gr < 0 ? BAR_R : BAR_N);
+  const ord = (r) => (r == null ? "" : "(" + ordinal(r) + ")");
   const f1 = (x) => (Math.round(x * 10) / 10).toFixed(1);
-  // Vegas' expected points per team from the spread and total (pre-game only)
+  const R = Math.round;
+  const nick = (abbr) => { const k = HELMET_NICK[abbr] || abbr; return k.charAt(0) + k.slice(1).toLowerCase(); };
+  // Vegas' expected points per team: half the over/under, plus half the spread
+  // for the favourite and minus half for the underdog. Pre-game only.
   const implied = (() => {
     const o = g.odds;
     if (!o || g.state !== "pre" || o.overUnder == null || o.spread == null) return null;
@@ -3220,74 +3230,116 @@ function TaleOfTape({ g, rows, stats, rz, through, players, onSelect }) {
     const fav = ou / 2 + sp / 2, dog = ou / 2 - sp / 2;
     return o.homeFav || o.awayFav || sp ? { home: homeFav ? fav : dog, away: homeFav ? dog : fav } : { home: ou / 2, away: ou / 2 };
   })();
-  const openCard = (P) => { const key = hrbNrmSafe(P.name); const full = players.find((x) => hrbNrmSafe(x.name) === key); if (full) onSelect(full); };
+  const fullOf = (P) => { const key = hrbNrmSafe(P.name); return players.find((x) => hrbNrmSafe(x.name) === key) || null; };
   const cell = (v, lbl, hot) => (
-    <span key={lbl} className="w-[2.85rem] shrink-0 text-center leading-none">
+    <span key={lbl} className="w-[2.6rem] shrink-0 text-center leading-none">
       <span className={"block text-[13px] font-black tabular-nums " + (hot ? "text-amber-500" : "text-slate-900 dark:text-white")}>{v}</span>
       <span className="block text-[7px] font-extrabold tracking-wider uppercase text-slate-400 mt-1">{lbl}</span>
     </span>
   );
-  const person = (x, pos, sub, cells) => {
+  const person = (x, abbr, pos, sub, cells) => {
     const st = x.inj && x.inj.injury_status ? String(x.inj.injury_status).toUpperCase() : null;
+    const full = fullOf(x.P);
+    const initials = String(x.P.name).split(" ").map((w) => w[0]).slice(0, 2).join("");
     return (
-      <button key={x.P.id + (x.tag || "")} onClick={() => openCard(x.P)} className="w-full flex items-center gap-1 px-3 py-2 border-t border-slate-100 dark:border-slate-800 text-left active:bg-slate-50 dark:active:bg-slate-800">
+      <button key={x.P.id + (x.tag || "") + (x.asRunner ? "run" : "")} onClick={() => full && onSelect(full)} className="w-full flex items-center gap-2 px-3 py-2 border-t border-slate-100 dark:border-slate-800 text-left active:bg-slate-50 dark:active:bg-slate-800">
+        <Headshot p={full || { name: x.P.name }} abbr={abbr} className="w-9 h-9 max-w-none shrink-0 rounded-full object-cover object-top bg-slate-100 dark:bg-slate-800"
+          fallback={<span className="w-9 h-9 shrink-0 rounded-full flex items-center justify-center text-[10px] font-extrabold bg-slate-100 dark:bg-slate-800 text-slate-400">{initials}</span>} />
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-1.5 min-w-0">
-            <span className="shrink-0 text-[9px] font-extrabold text-slate-400 w-5">{pos}</span>
             <span className="text-[12px] font-black text-slate-900 dark:text-white truncate">{x.P.name}</span>
             {st && <span className={"shrink-0 rounded px-1 py-px text-[7px] font-extrabold " + (st === "QUESTIONABLE" ? "bg-amber-500/20 text-amber-500" : "bg-rose-500/20 text-rose-500")}>{st.slice(0, 1)}</span>}
           </span>
-          <span className="block text-[9px] font-semibold text-slate-400 truncate pl-[1.625rem]">{x.tag && <span className="rounded px-1 py-px mr-1 text-[7px] font-extrabold uppercase tracking-wide bg-amber-500/20 text-amber-600 dark:text-amber-400">{x.tag}</span>}{x.tag ? String(sub).replace(/ games$/, "") : sub}</span>
+          <span className="block text-[9px] font-semibold text-slate-400 truncate">
+            <span className="font-extrabold text-slate-500 dark:text-slate-300">{pos}</span>
+            {x.tag && <span className="rounded px-1 py-px ml-1 text-[7px] font-extrabold uppercase tracking-wide bg-amber-500/20 text-amber-600 dark:text-amber-400">{x.tag}</span>}
+            {" · " + (x.tag ? String(sub).replace(/^TD in (\d+) of (\d+).*$/, "TD $1/$2") : sub)}
+          </span>
         </span>
-        {cells}
+        <span className="flex shrink-0">{cells}</span>
       </button>
     );
   };
   const groupHead = (title, defAbbr, r, what) => (
-    <div className="flex items-center justify-between gap-2 px-3 pt-2.5 pb-1.5">
-      <span className="text-[9px] font-extrabold tracking-widest uppercase text-slate-500 dark:text-slate-400">{title}</span>
-      {r != null && <span className={"rounded-full px-2 py-0.5 text-[9px] font-extrabold whitespace-nowrap " + (r >= soft ? CHIP_G : r <= 10 ? CHIP_R : CHIP_N)}>{defAbbr} {r >= soft ? "soft" : r <= 10 ? "stout" : "average"} vs {what} · {ordinal(r)}</span>}
+    <div className="flex items-center justify-between gap-2 px-3 pt-3 pb-1.5">
+      <span className="text-[10px] font-black tracking-widest uppercase text-slate-900 dark:text-white">{title}</span>
+      {r != null && <span className={"rounded-full px-2 py-0.5 text-[9px] font-extrabold whitespace-nowrap " + (r >= soft ? CHIP_G : r <= 10 ? CHIP_R : CHIP_N)}>{defAbbr} {r >= soft ? "soft" : r <= 10 ? "stout" : "average"} vs {what} {ord(r)}</span>}
     </div>
   );
+  // One stat row: the offense's number on the left, what the defense allows on
+  // the right, a meter under each. A longer, greener meter is better for the offense.
   const line = (label, ov, or_, dv, dr) => {
-    const edge = or_ != null && dr != null && or_ <= 10 && dr >= soft;
-    const tough = dr != null && dr <= 10 && !(or_ != null && or_ <= 10);
+    const og = offGrade(or_), dg = defGrade(dr);
+    const edge = og > 0 && dg > 0, tough = dg < 0 && og <= 0;
+    const ow = or_ == null ? 0 : ((n + 1 - or_) / n) * 100, dw = dr == null ? 0 : (dr / n) * 100;
     return (
-      <div key={label} className={"grid grid-cols-[1fr_5.25rem_1fr] items-center px-3 py-1.5 " + (edge ? "bg-emerald-50 dark:bg-emerald-500/10" : "")}>
-        <span className="text-left whitespace-nowrap"><span className={"text-[14px] font-black tabular-nums " + offTone(or_)}>{ov}</span> <span className="text-[9px] font-bold text-slate-400">{ord(or_)}</span></span>
-        <span className="text-center leading-none">
-          <span className="block text-[8px] font-extrabold tracking-widest uppercase text-slate-400">{label}</span>
-          {edge ? <span className="block text-[8px] font-black tracking-widest text-emerald-600 dark:text-emerald-400 mt-0.5">EDGE</span> : tough ? <span className="block text-[8px] font-black tracking-widest text-rose-500 mt-0.5">TOUGH</span> : null}
+      <div key={label} className={"grid grid-cols-[1fr_4.75rem_1fr] items-center gap-x-1 px-3 py-1.5 " + (edge ? "bg-emerald-50 dark:bg-emerald-500/10" : "")}>
+        <span className="min-w-0">
+          <span className="block whitespace-nowrap leading-none"><span className={"text-[15px] font-black tabular-nums " + tone(og)}>{ov}</span> <span className="text-[9px] font-bold text-slate-400">{ord(or_)}</span></span>
+          <span className="block mt-1 h-1 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden"><span className={"block h-full rounded-full " + bar(og)} style={{ width: ow + "%" }} /></span>
         </span>
-        <span className="text-right whitespace-nowrap"><span className="text-[9px] font-bold text-slate-400">{ord(dr)}</span> <span className={"text-[14px] font-black tabular-nums " + defTone(dr)}>{dv}</span></span>
+        <span className="text-center leading-none">
+          <span className="block text-[8px] font-extrabold tracking-widest uppercase text-slate-500 dark:text-slate-400">{label}</span>
+          {edge ? <span className="block text-[8px] font-black tracking-widest text-emerald-600 dark:text-emerald-400 mt-1">EDGE</span> : tough ? <span className="block text-[8px] font-black tracking-widest text-rose-500 mt-1">TOUGH</span> : null}
+        </span>
+        <span className="min-w-0 text-right">
+          <span className="block whitespace-nowrap leading-none"><span className="text-[9px] font-bold text-slate-400">{ord(dr)}</span> <span className={"text-[15px] font-black tabular-nums " + tone(dg)}>{dv}</span></span>
+          <span className="flex justify-end mt-1 h-1 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden"><span className={"block h-full rounded-full " + bar(dg)} style={{ width: dw + "%" }} /></span>
+        </span>
       </div>
     );
+  };
+  // The bottom line, in plain English: how they play, what the defense gives
+  // up, and which players that points to.
+  const bottomLine = (off, def, o, d, who, identity) => {
+    if (!o || !d) return null;
+    const passSoft = d.rank.defPassYds >= soft, passStout = d.rank.defPassYds <= 10, runSoft = d.rank.defRushYds >= soft, runStout = d.rank.defRushYds <= 10;
+    const passGood = o.rank.offPassYds != null && o.rank.offPassYds <= 10, runGood = o.rank.offRushYds != null && o.rank.offRushYds <= 10;
+    const D = nick(def.abbr), O = nick(off.abbr);
+    const s1 = identity === "Run-heavy" ? `The ${O} like to run the ball.` : identity === "Pass-heavy" ? `The ${O} like to throw the ball.` : `The ${O} mix the run and the pass.`;
+    const s2 = runSoft && passSoft ? `The ${D} struggle to stop both.` : runStout && passStout ? `The ${D} are good at stopping both.`
+      : [runSoft ? `easy to run on` : runStout ? `hard to run on` : null, passSoft ? `easy to throw on` : passStout ? `hard to throw on` : null].filter(Boolean).length
+        ? `The ${D} are ` + [runSoft ? `easy to run on` : runStout ? `hard to run on` : null, passSoft ? `easy to throw on` : passStout ? `hard to throw on` : null].filter(Boolean).join(" and ") + "."
+        : `The ${D} are average against both.`;
+    const likeRun = !runStout && (runSoft || runGood || identity === "Run-heavy");
+    const likePass = !passStout && (passSoft || passGood || identity === "Pass-heavy");
+    const last = (x) => { const parts = String(x.P.name).split(" "); return /^(jr\.?|sr\.?|ii|iii|iv|v)$/i.test(parts[parts.length - 1] || "") ? parts.slice(-2, -1)[0] : parts[parts.length - 1]; };
+    const names = [];
+    if (who && likeRun) for (const b of who.backs.slice(0, 2)) names.push(last(b));
+    if (who && likePass) { if (who.qb && !names.includes(last(who.qb))) names.push(last(who.qb)); if (who.catchers[0]) names.push(last(who.catchers[0])); }
+    const lean = likeRun && likePass ? "Good spot on the ground and through the air." : likeRun ? "The run game is the better side." : likePass ? "The passing game is the better side." : "No clear advantage for this offense.";
+    return { text: `${s1} ${s2} ${lean}`, names, good: likeRun || likePass };
   };
   const side = (off, def, pts) => {
     const o = rowOf(off.abbr), d = rowOf(def.abbr);
     const pr = o ? o.rank.passRate : null;
     const identity = pr == null ? null : pr <= 8 ? "Pass-heavy" : pr >= n - 7 ? "Run-heavy" : "Balanced";
     const who = tapePlayers(stats, rz, through, off.abbr);
-    const R = Math.round;
+    const bl = bottomLine(off, def, o, d, who, identity);
+    const base = off.color || teamColorSafe(off.abbr), l = lumOf(base || "#334155");
+    const bg = l > 0.55 ? shade(base, -(l * 100 - 42)) : base;
+    const logo = (lumOf(bg) < 0.5 ? darkLogo(off.abbr) : null) || off.logo || TEAM_LOGOS[off.abbr];
     return (
       <div key={off.abbr}>
-        <div className="flex items-center gap-2.5 px-3 pt-3 pb-2">
-          <img src={off.logo || TEAM_LOGOS[off.abbr]} alt="" className="w-8 h-8 object-contain shrink-0" />
-          <div className="min-w-0 flex-1">
-            <div className="text-[12px] font-black tracking-wide uppercase text-slate-900 dark:text-white">When {off.abbr} has the ball</div>
-            {o && <div className="text-[10px] font-semibold leading-snug text-slate-500 dark:text-slate-400">
-              <span className="block truncate"><span className="font-extrabold text-slate-700 dark:text-slate-200">{identity}</span> · {R(o.val.passRate)}% pass ({ord(pr)})</span>
-              <span className="block truncate">Pass att {ord(o.rank.passAtt)} · Rush att {ord(o.rank.rushAtt)}</span>
-            </div>}
+        {/* broadcast-style team bar */}
+        <div className="flex items-center gap-2.5 px-3 py-2 text-white" style={{ background: `linear-gradient(100deg, ${bg} 0%, ${bg} 60%, ${shade(bg, -18)} 100%)` }}>
+          <img src={logo} alt="" className="w-9 h-9 object-contain shrink-0 drop-shadow" onError={(e) => { const f = off.logo || TEAM_LOGOS[off.abbr]; if (f && e.currentTarget.src !== f) e.currentTarget.src = f; }} />
+          <div className="min-w-0 flex-1 leading-tight">
+            <div className="text-[13px] font-black tracking-wide uppercase truncate">{HELMET_NICK[off.abbr] || off.abbr} offense</div>
+            {o && <div className="text-[10px] font-semibold text-white/80 truncate">{identity} · {R(o.val.passRate)}% pass {ord(pr)}</div>}
           </div>
-          {pts != null && <span className="shrink-0 text-center leading-none rounded-lg bg-slate-100 dark:bg-slate-800 px-2 py-1.5">
-            <span className="block text-[13px] font-black tabular-nums text-slate-900 dark:text-white">{f1(pts)}</span>
-            <span className="block text-[7px] font-extrabold tracking-wider uppercase text-slate-400 mt-0.5">Implied pts</span>
+          {pts != null && <span className="shrink-0 text-center leading-none rounded-lg bg-black/25 px-2.5 py-1.5">
+            <span className="block text-[15px] font-black tabular-nums">{f1(pts)}</span>
+            <span className="block text-[7px] font-extrabold tracking-wider uppercase text-white/75 mt-0.5">Vegas pts</span>
           </span>}
         </div>
+        {bl && <div className={"mx-3 mt-2.5 rounded-xl px-3 py-2 " + (bl.good ? "bg-emerald-50 dark:bg-emerald-500/10" : "bg-slate-50 dark:bg-slate-800/60")}>
+          <div className="text-[8px] font-black tracking-widest uppercase text-slate-500 dark:text-slate-400">Bottom line</div>
+          <div className="text-[11px] font-semibold leading-snug text-slate-800 dark:text-slate-100 mt-0.5">{bl.text}{bl.names.length > 0 && <> <span className="font-black">Watch: {bl.names.join(", ")}.</span></>}</div>
+        </div>}
         {o && d ? (
           <>
-            <div className="grid grid-cols-[1fr_5.25rem_1fr] px-3 pb-0.5 text-[8px] font-extrabold tracking-widest uppercase text-slate-400">
+            <div className="grid grid-cols-[1fr_4.75rem_1fr] gap-x-1 px-3 pt-3 pb-0.5 text-[8px] font-extrabold tracking-widest uppercase text-slate-400">
               <span>{off.abbr} offense</span><span /><span className="text-right">{def.abbr} defense allows</span>
             </div>
             {line("Pass yds/g", R(o.val.offPassYds), o.rank.offPassYds, R(d.val.defPassYds), d.rank.defPassYds)}
@@ -3295,29 +3347,31 @@ function TaleOfTape({ g, rows, stats, rz, through, players, onSelect }) {
             {line("Rush yds/g", R(o.val.offRushYds), o.rank.offRushYds, R(d.val.defRushYds), d.rank.defRushYds)}
             {line("Rush TD", o.val.offRushTd, o.rank.offRushTd, d.val.defRushTd, d.rank.defRushTd)}
             {line("Points/g", f1(o.val.ppg), o.rank.ppg, f1(d.val.papg), d.rank.papg)}
+            <div className="px-3 pt-1 text-[9px] font-semibold text-slate-400">Pass attempts {ord(o.rank.passAtt)} · Rush attempts {ord(o.rank.rushAtt)}</div>
           </>
-        ) : <div className="px-3 pb-2 text-[10px] text-slate-400">Team stats aren't in yet.</div>}
+        ) : <div className="px-3 py-2 text-[10px] text-slate-400">Team stats aren't in yet.</div>}
         {who && (who.qb || who.catchers.length > 0) && groupHead("Passing game", def.abbr, d ? d.rank.defPassYds : null, "pass")}
-        {who && who.qb && person(who.qb, "QB", `${who.qb.n} games${who.qb.rushTd ? " · " + who.qb.rushTd + " rush TD" : ""}`, [
-          cell(R(who.qb.passYds / who.qb.n), "Yds/g"), cell(f1(who.qb.passTd / who.qb.n), "TD/g"), cell(f1(who.qb.att / who.qb.n), "Att/g"), cell(`${who.qb.multiPassTd}/${who.qb.n}`, "2+ TD gms"),
+        {who && who.qb && person(who.qb, off.abbr, "QB", `${who.qb.n} games`, [
+          cell(R(who.qb.passYds / who.qb.n), "Yds/g"), cell(f1(who.qb.passTd / who.qb.n), "TD/g"), cell(f1(who.qb.att / who.qb.n), "Att/g"), cell(`${who.qb.multiPassTd}/${who.qb.n}`, "2+ TD gm"),
         ])}
-        {who && who.catchers.map((x) => person(x, x.pos || "WR", `TD in ${x.tdGames} of ${x.n} games`, [
+        {who && who.catchers.map((x) => person(x, off.abbr, x.pos || "WR", `TD in ${x.tdGames} of ${x.n}`, [
           cell(f1(x.tgt / x.n), "Tgt/g"), cell(R(x.recYds / x.n), "Yds/g"), cell(x.recTd + x.rushTd, "TD"), cell(x.rz ? x.rz.ezTgt : "—", "EZ tgt", x.rz && x.rz.ezTgt >= 5),
         ]))}
         {who && who.backs.length > 0 && groupHead("Run game", def.abbr, d ? d.rank.defRushYds : null, "run")}
-        {who && who.backs.map((x) => person(x, x.pos || "RB", `TD in ${x.tdGames} of ${x.n}${x.tgt / x.n >= 3 ? " · " + f1(x.tgt / x.n) + " tgt/g" : " games"}`, [
-          cell(f1(x.car / x.n), "Car/g"), cell(R(x.rushYds / x.n), "Yds/g"), cell(x.rushTd + x.recTd, "TD"), cell(x.rz ? x.rz.glCar : "—", "GL car", x.rz && x.rz.glCar >= 5),
+        {who && who.backs.map((x) => person(x, off.abbr, x.asRunner ? "QB" : (x.pos || "RB"), x.asRunner ? `rush TD in ${x.P.games.filter((gm) => (gm.rushTd || 0) > 0).length} of ${x.n}` : `TD in ${x.tdGames} of ${x.n}${x.tgt / x.n >= 3 ? " · " + f1(x.tgt / x.n) + " tgt/g" : ""}`, [
+          cell(f1(x.car / x.n), "Car/g"), cell(R(x.rushYds / x.n), "Yds/g"), cell(x.asRunner ? x.rushTd : x.rushTd + x.recTd, x.asRunner ? "Rush TD" : "TD"), cell(x.rz ? x.rz.glCar : "—", "GL car", x.rz && x.rz.glCar >= 5),
         ]))}
-        {!who && <div className="px-3 pb-3 text-[10px] text-slate-400">No player stats yet.</div>}
+        {!who && <div className="px-3 py-3 text-[10px] text-slate-400">No player stats yet.</div>}
+        <div className="h-2" />
       </div>
     );
   };
   return (
-    <div className="rounded-b-xl border border-t-0 border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden divide-y-4 divide-slate-100 dark:divide-slate-800">
+    <div className="rounded-b-xl border border-t-0 border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
       {side(g.away, g.home, implied ? implied.away : null)}
       {side(g.home, g.away, implied ? implied.home : null)}
-      <div className="px-3 py-2 text-[9px] leading-snug text-slate-400">
-        <span className={GOOD + " font-bold"}>Green</span> helps the team with the ball (top-10 offense, or a bottom-10 defense across from it); <span className={BAD + " font-bold"}>red</span> hurts it. Defense ranks: 1st = fewest allowed. EZ tgt = targets thrown into the end zone; GL car = carries inside the 5.{through ? ` Stats through Week ${through}.` : ""}{rz ? "" : " End-zone data is still loading."}
+      <div className="px-3 py-2 text-[9px] leading-snug text-slate-400 border-t border-slate-100 dark:border-slate-800">
+        <span className={GOOD + " font-bold"}>Green</span> and a long bar are good for the team with the ball; <span className={BAD + " font-bold"}>red</span> and a short bar are bad. Ranks are out of {n}; for a defense, (1st) allows the fewest. EZ tgt = targets thrown into the end zone. GL car = carries inside the 5 (designed runs; scrambles aren't counted). Vegas pts = half the over/under, plus or minus half the spread.{through ? ` Stats through Week ${through}.` : ""}{rz ? "" : " End-zone data is still loading."}
       </div>
     </div>
   );
@@ -3658,9 +3712,9 @@ function TdBoardTab({ players, teams, onSelect, navTick, seasonStats }) {
                         <MatchCard g={g} onClick={() => setSelGame(g)} />
                         <button onClick={() => setOpenTape((o) => ({ ...o, [g.id]: !o[g.id] }))} aria-expanded={open}
                           className={"w-full mt-1 flex items-center justify-center gap-1.5 py-1.5 text-[10px] font-extrabold tracking-widest uppercase border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 " + (open ? "rounded-t-xl text-blue-600 dark:text-blue-400" : "rounded-xl text-slate-500 dark:text-slate-400")}>
-                          Tale of the tape <span className={"text-[11px] leading-none transition-transform " + (open ? "rotate-180" : "")}>▾</span>
+                          Matchup breakdown <span className={"text-[11px] leading-none transition-transform " + (open ? "rotate-180" : "")}>▾</span>
                         </button>
-                        {open && <TaleOfTape g={g} rows={tape} stats={tapeStats} rz={rz} through={tapeThrough} players={players} onSelect={onSelect} />}
+                        {open && <MatchupBreakdown g={g} rows={tape} stats={tapeStats} rz={rz} through={tapeThrough} players={players} onSelect={onSelect} />}
                       </div>
                     );
                   })}
