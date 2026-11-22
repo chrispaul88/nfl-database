@@ -3270,7 +3270,7 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
   // the right, a meter under each. A longer, greener meter is better for the offense.
   const line = (label, ov, or_, dv, dr) => {
     const og = offGrade(or_), dg = defGrade(dr);
-    const edge = og > 0 && dg > 0, tough = dg < 0 && og <= 0;
+    const edge = og > 0 && dg > 0, tough = dg < 0 && og <= 0, clash = og > 0 && dg < 0;
     const ow = or_ == null ? 0 : ((n + 1 - or_) / n) * 100, dw = dr == null ? 0 : (dr / n) * 100;
     return (
       <div key={label} className={"grid grid-cols-[1fr_4.75rem_1fr] items-center gap-x-1 px-3 py-1.5 " + (edge ? "bg-emerald-50 dark:bg-emerald-500/10" : "")}>
@@ -3280,7 +3280,7 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
         </span>
         <span className="text-center leading-none">
           <span className="block text-[8px] font-extrabold tracking-widest uppercase text-slate-500 dark:text-slate-400">{label}</span>
-          {edge ? <span className="block text-[8px] font-black tracking-widest text-emerald-600 dark:text-emerald-400 mt-1">EDGE</span> : tough ? <span className="block text-[8px] font-black tracking-widest text-rose-500 mt-1">TOUGH</span> : null}
+          {edge ? <span className="block text-[8px] font-black tracking-widest text-emerald-600 dark:text-emerald-400 mt-1">EDGE</span> : tough ? <span className="block text-[8px] font-black tracking-widest text-rose-500 mt-1">TOUGH</span> : clash ? <span className="block text-[7px] font-black tracking-wider text-amber-500 mt-1">BEST VS BEST</span> : null}
         </span>
         <span className="min-w-0 text-right">
           <span className="block whitespace-nowrap leading-none"><span className="text-[9px] font-bold text-slate-400">{ord(dr)}</span> <span className={"text-[15px] font-black tabular-nums " + tone(dg)}>{dv}</span></span>
@@ -3312,6 +3312,16 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
     const backOk = (b) => (b.asRunner ? b.rushTd >= 3 || b.car / b.n >= 6 : b.car / b.n >= 12 || b.rushTd + b.recTd >= 3);
     const qbOk = (q) => q.n >= 3 && q.passTd / q.n >= 1.2;
     const catchOk = (c) => c.tgt / c.n >= 6 || c.recTd + c.rushTd >= 3;
+    // Yards and touchdowns are different questions. When the side we like runs
+    // into a defense that's stingy with touchdowns, say so instead of implying both.
+    const tdNote = (liked, kind, offTd, defTd, where) => {
+      if (!liked || defTd == null) return "";
+      if (defTd <= 10) return offTd != null && offTd <= 10
+        ? ` Touchdowns are best against best: the ${O} are ${ordinal(offTd)} in ${kind} TDs, the ${D} allow the ${ordinal(defTd)}-fewest. Yards are the safer read than touchdowns.`
+        : ` But the ${D} allow few ${kind} touchdowns (${ordinal(defTd)}-fewest), so think yards more than touchdowns.`;
+      if (defTd >= soft) return ` The ${D} also give up touchdowns ${where} (${ordinal(defTd)}).`;
+      return "";
+    };
     const names = [];
     if (who && likeRun) for (const b of who.backs.slice(0, 2)) if (backOk(b)) names.push(last(b));
     if (who && likePass) { if (who.qb && qbOk(who.qb) && !names.includes(last(who.qb))) names.push(last(who.qb)); for (const c of who.catchers.slice(0, 2)) if (catchOk(c) && names.length < 4) names.push(last(c)); }
@@ -3319,7 +3329,9 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
     const wasted = [passSoft && passBad ? `the ${O}' passing game ranks ${ordinal(o.rank.offPassYds)}` : null, passSoft && !passBad && newQb ? starts : null, runSoft && runBad ? `the ${O}' run game ranks ${ordinal(o.rank.offRushYds)}` : null].filter(Boolean);
     const lean = (likeRun && likePass ? "Good spot on the ground and through the air." : likeRun ? "The run game is the better side." : likePass ? "The passing game is the better side." : "No clear advantage for this offense.")
       + (wasted.length ? ` The opening is there, but ${wasted.join(" and ")}.` : "")
-      + (newQb && !wasted.includes(starts) ? ` ${starts}, so the team's passing numbers aren't his.` : "");
+      + (newQb && !wasted.includes(starts) ? ` ${starts}, so the team's passing numbers aren't his.` : "")
+      + tdNote(likeRun, "rushing", o.rank.offRushTd, d.rank.defRushTd, "on the ground")
+      + tdNote(likePass, "passing", o.rank.offPassTd, d.rank.defPassTd, "through the air");
     return { text: `${s1} ${s2} ${lean}`, names, good: likeRun || likePass };
   };
   const side = (off, def, pts) => {
@@ -3383,7 +3395,7 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
       {side(g.away, g.home, implied ? implied.away : null)}
       {side(g.home, g.away, implied ? implied.home : null)}
       <div className="px-3 py-2 text-[9px] leading-snug text-slate-400 border-t border-slate-100 dark:border-slate-800">
-        <span className={GOOD + " font-bold"}>Green</span> and a long bar are good for the team with the ball; <span className={BAD + " font-bold"}>red</span> and a short bar are bad. Ranks are out of {n}; for a defense, (1st) allows the fewest. EZ tgt = targets thrown into the end zone. GL car = carries inside the 5 (designed runs; scrambles aren't counted). Vegas pts = half the over/under, plus or minus half the spread.{through ? ` Stats through Week ${through}.` : ""}{rz ? "" : " End-zone data is still loading."}
+        <span className={GOOD + " font-bold"}>Green</span> and a long bar are good for the team with the ball; <span className={BAD + " font-bold"}>red</span> and a short bar are bad. EDGE = top-10 offense against a bottom-10 defense; TOUGH = top-10 defense; BEST VS BEST = both top 10. Ranks are out of {n}; for a defense, (1st) allows the fewest. EZ tgt = targets thrown into the end zone. GL car = carries inside the 5 (designed runs; scrambles aren't counted). Vegas pts = half the over/under, plus or minus half the spread.{through ? ` Stats through Week ${through}.` : ""}{rz ? "" : " End-zone data is still loading."}
       </div>
     </div>
   );
