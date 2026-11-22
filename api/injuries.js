@@ -5,6 +5,10 @@ export default async function handler(req, res) {
   // /api/injuries?espn=<id> — the deep, single-player record (was its own
   // endpoint; folded in here to stay under Vercel's 12-function Hobby cap).
   if (req.query?.espn) return playerInjuryHandler(req, res);
+  // /api/injuries?tx=1 — league roster moves (signings, waivers, practice-squad
+  // elevations, IR/PUP placements), grouped by team. Lives here for the same
+  // 12-function reason.
+  if (req.query?.tx) return transactionsHandler(req, res);
 
   try {
     // Two hosts serve this report; try both, keep whichever returns more.
@@ -120,5 +124,60 @@ async function playerInjuryHandler(req, res) {
     } });
   } catch (e) {
     return res.status(200).json({ injury: null, error: String(e.message || e) });
+  }
+}
+
+// /api/injuries?tx=1 — ESPN's NFL transactions wire, newest first, grouped by
+// team abbreviation: { moves: { BUF: [{ date, text }] } }. Add &debug=1 to see
+// which source answered and the raw shape.
+async function transactionsHandler(req, res) {
+  const TEAM_ID = { 1: "ATL", 2: "BUF", 3: "CHI", 4: "CIN", 5: "CLE", 6: "DAL", 7: "DEN", 8: "DET", 9: "GB", 10: "TEN", 11: "IND", 12: "KC", 13: "LV", 14: "LAR", 15: "MIA", 16: "MIN", 17: "NE", 18: "NO", 19: "NYG", 20: "NYJ", 21: "PHI", 22: "ARI", 23: "PIT", 24: "LAC", 25: "SF", 26: "SEA", 27: "TB", 28: "WSH", 29: "CAR", 30: "JAX", 33: "BAL", 34: "HOU" };
+  const FIX = { WAS: "WSH", JAC: "JAX", LA: "LAR" };
+  const HOSTS = [
+    "https://site.api.espn.com/apis/site/v2/sports/football/nfl/transactions",
+    "https://site.web.api.espn.com/apis/site/v2/sports/football/nfl/transactions",
+  ];
+  const tried = []; let raw = null, used = null, best = [];
+  try {
+    for (const host of HOSTS) {
+      const found = [], seen = new Set();
+      // Don't trust one payload shape: collect anything with a date and a
+      // description, and take the team from the entry or its parent.
+      const walk = (node, teamAbbr) => {
+        if (!node || typeof node !== "object") return;
+        if (Array.isArray(node)) { for (const x of node) walk(x, teamAbbr); return; }
+        const t = node.team;
+        const abbr = t && t.abbreviation ? String(t.abbreviation).toUpperCase() : t && t.id && TEAM_ID[t.id] ? TEAM_ID[t.id] : teamAbbr;
+        if (typeof node.description === "string" && node.date && abbr) {
+          const key = abbr + "|" + node.date + "|" + node.description;
+          if (!seen.has(key)) { seen.add(key); found.push({ team: FIX[abbr] || abbr, date: node.date, text: node.description.trim() }); }
+        }
+        for (const [k, v] of Object.entries(node)) if (v && typeof v === "object" && k !== "links" && k !== "logos") walk(v, abbr);
+      };
+      for (let page = 1; page <= 3; page++) {
+        const url = `${host}?limit=200&page=${page}`;
+        try {
+          const r = await fetch(url, { headers: { accept: "application/json", "user-agent": "Mozilla/5.0" } });
+          tried.push(url + " → " + r.status);
+          if (!r.ok) break;
+          const text = await r.text();
+          if (!raw) raw = text.slice(0, 900);
+          let d; try { d = JSON.parse(text); } catch { break; }
+          const before = found.length;
+          walk(d, null);
+          if (found.length === before || !(d.pageCount > page)) break;
+        } catch (e) { tried.push(url + " → " + String(e.message || e)); break; }
+      }
+      if (found.length > best.length) { best = found; used = host; }
+      if (best.length) break;
+    }
+    best.sort((a, b) => new Date(b.date) - new Date(a.date));
+    const moves = {};
+    for (const m of best) { const l = (moves[m.team] ??= []); if (l.length < 60) l.push({ date: m.date, text: m.text }); }
+    if (req.query?.debug) return res.status(200).json({ source: used, tried, raw, total: best.length, teams: Object.keys(moves).length, sample: best.slice(0, 8) });
+    res.setHeader("Cache-Control", "s-maxage=900, stale-while-revalidate=1800");
+    return res.status(200).json({ updatedAt: new Date().toISOString(), count: best.length, moves });
+  } catch (e) {
+    return res.status(200).json({ moves: {}, error: String(e.message || e), tried });
   }
 }
