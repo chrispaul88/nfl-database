@@ -1073,10 +1073,13 @@ function FormationView({ roster, abbr, unit, setUnit, onSelectPlayer, lineRank, 
       if (sitP(p)) {
         // Next man up: same position family first (WLB1 out -> WLB2), then
         // any healthy non-starter in the same row, shallowest depth first.
-        const fam = norm(baseOf(p)), row = ROW_OF(baseOf(p));
+        // The exact same label wins before anything else: LDE1 out -> LDE2,
+        // never an RDE2 or DE2 who happens to sit earlier in the roster.
+        const own = baseOf(p), fam = norm(own), row = ROW_OF(own);
+        const fit = (q) => (baseOf(q) === own ? 0 : norm(baseOf(q)) === fam ? 1 : 2);
         const repl = roster
           .filter((q) => !used.has(q.id) && !starterIds.has(q.id) && q.id !== p.id && baseOf(q) && ROW_OF(baseOf(q)) === row && !sitP(q))
-          .sort((a, b) => (norm(baseOf(a)) === fam ? 0 : 1) - (norm(baseOf(b)) === fam ? 0 : 1) || depthNo(a) - depthNo(b))[0];
+          .sort((a, b) => fit(a) - fit(b) || depthNo(a) - depthNo(b) || (a.depthSrc === "airtable" ? 0 : 1) - (b.depthSrc === "airtable" ? 0 : 1))[0];
         if (repl) { who = repl; nextUp = true; }
         else { rows[ROW_OF(baseOf(p))].push({ p: null, lbl: baseOf(p), vacant: true }); return; }   // nobody behind him: open slot, he's on the sideline
       }
