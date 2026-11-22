@@ -3158,6 +3158,33 @@ function tapeRows(seasonStats) {
     const o = (out[r.abbr] ??= { abbr: r.abbr, gp: r.gp, val: r.val, rank: {} });
     o.rank[k] = r.rank;
   }
+  // Efficiency, which game script can't fake. Yards allowed per GAME flatters a
+  // bad team (opponents lead, run the clock, stop throwing), so the breakdown
+  // grades defenses on yards per pass attempt and per carry instead. Attempts
+  // and carries faced come from every player-game logged against that team.
+  const own = {}, faced = {};
+  for (const P of Object.values((seasonStats && seasonStats.players) || {})) for (const gm of P.games || []) {
+    const t = gm.team || P.team, op = gm.opp;
+    if (t) { const a = (own[t] ??= { att: 0, car: 0 }); a.att += gm.att || 0; a.car += gm.car || 0; }
+    if (op) { const a = (faced[op] ??= { att: 0, car: 0 }); a.att += gm.att || 0; a.car += gm.car || 0; }
+  }
+  const pick = (m, abbr) => m[abbr] || m[Object.keys(m).find((k) => injTeamEq(k, abbr))] || { att: 0, car: 0 };
+  const T = (seasonStats && seasonStats.teams) || {};
+  for (const o of Object.values(out)) {
+    const t = T[o.abbr] || {}, ow = pick(own, o.abbr), fc = pick(faced, o.abbr), gp = o.gp || 1;
+    o.val.offPassYpa = ow.att >= 30 ? (t.off?.passYds || 0) / ow.att : null;
+    o.val.offRushYpc = ow.car >= 30 ? (t.off?.rushYds || 0) / ow.car : null;
+    o.val.defPassYpa = fc.att >= 30 ? (t.def?.passYds || 0) / fc.att : null;
+    o.val.defRushYpc = fc.car >= 30 ? (t.def?.rushYds || 0) / fc.car : null;
+    o.val.defPassAttPg = fc.att / gp; o.val.defRushAttPg = fc.car / gp;
+  }
+  const rankBy = (k, asc) => {
+    const arr = Object.values(out).filter((o) => o.val[k] != null).sort((a, b) => (asc ? a.val[k] - b.val[k] : b.val[k] - a.val[k]));
+    let lastV = null, lastR = 0;
+    arr.forEach((o, i) => { const v = Math.round(o.val[k] * 100); if (v !== lastV) { lastR = i + 1; lastV = v; } o.rank[k] = lastR; });
+  };
+  rankBy("offPassYpa", false); rankBy("offRushYpc", false); rankBy("defPassYpa", true); rankBy("defRushYpc", true);
+  rankBy("defPassAttPg", true); rankBy("defRushAttPg", true);
   return out;
 }
 // The players worth knowing for one offense: the current passer, the top two
@@ -3268,8 +3295,10 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
   );
   // One stat row: the offense's number on the left, what the defense allows on
   // the right, a meter under each. A longer, greener meter is better for the offense.
-  const line = (label, ov, or_, dv, dr) => {
-    const og = offGrade(or_), dg = defGrade(dr);
+  // plainDef: show the defense's per-game number without a verdict, because the
+  // per-play row beneath it is the one that says whether the defense is good.
+  const line = (label, ov, or_, dv, dr, plainDef) => {
+    const og = offGrade(or_), dg = plainDef ? 0 : defGrade(dr);
     const edge = og > 0 && dg > 0, tough = dg < 0 && og <= 0, clash = og > 0 && dg < 0;
     const ow = or_ == null ? 0 : ((n + 1 - or_) / n) * 100, dw = dr == null ? 0 : (dr / n) * 100;
     return (
@@ -3291,9 +3320,19 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
   };
   // The bottom line, in plain English: how they play, what the defense gives
   // up, and which players that points to.
-  const bottomLine = (off, def, o, d, who, identity) => {
+  const passD = (d) => (d ? d.rank.defPassYpa ?? d.rank.defPassYds : null), runD = (d) => (d ? d.rank.defRushYpc ?? d.rank.defRushYds : null);
+  // how many points this offense is favoured by (negative = underdog); pre-game only
+  const marginFor = (isHome) => {
+    const o = g.odds;
+    if (!o || g.state !== "pre" || o.spread == null) return null;
+    const sp = Math.abs(Number(o.spread)); if (!isFinite(sp)) return null;
+    const homeFav = o.homeFav || (!o.awayFav && Number(o.spread) < 0);
+    return (isHome ? homeFav : !homeFav) ? sp : -sp;
+  };
+  const bottomLine = (off, def, o, d, who, identity, margin) => {
     if (!o || !d) return null;
-    const passSoft = d.rank.defPassYds >= soft, passStout = d.rank.defPassYds <= 10, runSoft = d.rank.defRushYds >= soft, runStout = d.rank.defRushYds <= 10;
+    const pR = passD(d), rR = runD(d);
+    const passSoft = pR != null && pR >= soft, passStout = pR != null && pR <= 10, runSoft = rR != null && rR >= soft, runStout = rR != null && rR <= 10;
     const passGood = o.rank.offPassYds != null && o.rank.offPassYds <= 10, runGood = o.rank.offRushYds != null && o.rank.offRushYds <= 10;
     const D = nick(def.abbr), O = nick(off.abbr);
     const s1 = identity === "Run-heavy" ? `The ${O} like to run the ball.` : identity === "Pass-heavy" ? `The ${O} like to throw the ball.` : `The ${O} mix the run and the pass.`;
@@ -3322,6 +3361,17 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
       if (defTd >= soft) return ` The ${D} also give up touchdowns ${where} (${ordinal(defTd)}).`;
       return "";
     };
+    // Game script: raw yards allowed can say the opposite of yards per play, and
+    // a big spread changes what an offense will be doing in the second half.
+    const scriptNote = () => {
+      let t = "";
+      if (d.rank.defPassYpa != null && d.rank.defPassYds <= 10 && d.rank.defPassYpa > 16) t += ` Don't be fooled by the ${D}' passing yards allowed (${ordinal(d.rank.defPassYds)}-fewest): teams get ahead and stop throwing. Per throw they rank ${ordinal(d.rank.defPassYpa)}.`;
+      else if (d.rank.defPassYpa != null && d.rank.defPassYds >= soft && d.rank.defPassYpa <= 16) t += ` The ${D} give up passing yards on volume (teams chasing them throw a lot), not per throw (${ordinal(d.rank.defPassYpa)}).`;
+      if (d.rank.defRushYpc != null && d.rank.defRushYds >= soft && d.rank.defRushYpc <= 16) t += ` The ${D} give up rushing yards on volume (teams run out the clock on them), not per carry (${ordinal(d.rank.defRushYpc)}).`;
+      if (margin != null && margin >= 7) t += ` Favored by ${margin}, the ${O} may run more and throw less late.`;
+      else if (margin != null && margin <= -7) t += ` As ${-margin}-point underdogs, the ${O} will likely have to throw to catch up.`;
+      return t;
+    };
     const names = [];
     if (who && likeRun) for (const b of who.backs.slice(0, 2)) if (backOk(b)) names.push(last(b));
     if (who && likePass) { if (who.qb && qbOk(who.qb) && !names.includes(last(who.qb))) names.push(last(who.qb)); for (const c of who.catchers.slice(0, 2)) if (catchOk(c) && names.length < 4) names.push(last(c)); }
@@ -3331,7 +3381,8 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
       + (wasted.length ? ` The opening is there, but ${wasted.join(" and ")}.` : "")
       + (newQb && !wasted.includes(starts) ? ` ${starts}, so the team's passing numbers aren't his.` : "")
       + tdNote(likeRun, "rushing", o.rank.offRushTd, d.rank.defRushTd, "on the ground")
-      + tdNote(likePass, "passing", o.rank.offPassTd, d.rank.defPassTd, "through the air");
+      + tdNote(likePass, "passing", o.rank.offPassTd, d.rank.defPassTd, "through the air")
+      + scriptNote();
     return { text: `${s1} ${s2} ${lean}`, names, good: likeRun || likePass };
   };
   const side = (off, def, pts) => {
@@ -3339,7 +3390,7 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
     const pr = o ? o.rank.passRate : null;
     const identity = pr == null ? null : pr <= 8 ? "Pass-heavy" : pr >= n - 7 ? "Run-heavy" : "Balanced";
     const who = tapePlayers(stats, rz, through, off.abbr);
-    const bl = bottomLine(off, def, o, d, who, identity);
+    const bl = bottomLine(off, def, o, d, who, identity, marginFor(off === g.home));
     const base = off.color || teamColorSafe(off.abbr), l = lumOf(base || "#334155");
     const bg = l > 0.55 ? shade(base, -(l * 100 - 42)) : base;
     const logo = (lumOf(bg) < 0.5 ? darkLogo(off.abbr) : null) || off.logo || TEAM_LOGOS[off.abbr];
@@ -3366,22 +3417,24 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
             <div className="grid grid-cols-[1fr_4.75rem_1fr] gap-x-1 px-3 pt-3 pb-0.5 text-[8px] font-extrabold tracking-widest uppercase text-slate-400">
               <span>{off.abbr} offense</span><span /><span className="text-right">{def.abbr} defense allows</span>
             </div>
-            {line("Pass yds/g", R(o.val.offPassYds), o.rank.offPassYds, R(d.val.defPassYds), d.rank.defPassYds)}
+            {line("Pass yds/g", R(o.val.offPassYds), o.rank.offPassYds, R(d.val.defPassYds), d.rank.defPassYds, d.rank.defPassYpa != null)}
+            {(o.val.offPassYpa != null || d.val.defPassYpa != null) && line("Yds/pass", o.val.offPassYpa != null ? f1(o.val.offPassYpa) : "—", o.rank.offPassYpa, d.val.defPassYpa != null ? f1(d.val.defPassYpa) : "—", d.rank.defPassYpa)}
             {line("Pass TD", o.val.offPassTd, o.rank.offPassTd, d.val.defPassTd, d.rank.defPassTd)}
-            {line("Rush yds/g", R(o.val.offRushYds), o.rank.offRushYds, R(d.val.defRushYds), d.rank.defRushYds)}
+            {line("Rush yds/g", R(o.val.offRushYds), o.rank.offRushYds, R(d.val.defRushYds), d.rank.defRushYds, d.rank.defRushYpc != null)}
+            {(o.val.offRushYpc != null || d.val.defRushYpc != null) && line("Yds/carry", o.val.offRushYpc != null ? f1(o.val.offRushYpc) : "—", o.rank.offRushYpc, d.val.defRushYpc != null ? f1(d.val.defRushYpc) : "—", d.rank.defRushYpc)}
             {line("Rush TD", o.val.offRushTd, o.rank.offRushTd, d.val.defRushTd, d.rank.defRushTd)}
             {line("Points/g", f1(o.val.ppg), o.rank.ppg, f1(d.val.papg), d.rank.papg)}
             <div className="px-3 pt-1 text-[9px] font-semibold text-slate-400">Pass attempts {ord(o.rank.passAtt)} · Rush attempts {ord(o.rank.rushAtt)}</div>
           </>
         ) : <div className="px-3 py-2 text-[10px] text-slate-400">Team stats aren't in yet.</div>}
-        {who && (who.qb || who.catchers.length > 0) && groupHead("Passing game", def.abbr, d ? d.rank.defPassYds : null, "pass")}
+        {who && (who.qb || who.catchers.length > 0) && groupHead("Passing game", def.abbr, passD(d), "pass")}
         {who && who.qb && person(who.qb.n < 3 ? { ...who.qb, tag: "New QB" } : who.qb, off.abbr, "QB", `${who.qb.n} game${who.qb.n === 1 ? "" : "s"}`, [
           cell(R(who.qb.passYds / who.qb.n), "Yds/g"), cell(f1(who.qb.passTd / who.qb.n), "TD/g"), cell(f1(who.qb.att / who.qb.n), "Att/g"), cell(`${who.qb.multiPassTd}/${who.qb.n}`, "2+ TD gm"),
         ])}
         {who && who.catchers.map((x) => person(x, off.abbr, x.pos || "WR", `TD in ${x.tdGames} of ${x.n}`, [
           cell(f1(x.tgt / x.n), "Tgt/g"), cell(R(x.recYds / x.n), "Yds/g"), cell(x.recTd + x.rushTd, "TD"), cell(x.rz ? x.rz.ezTgt : "—", "EZ tgt", x.rz && x.rz.ezTgt >= 5),
         ]))}
-        {who && who.backs.length > 0 && groupHead("Run game", def.abbr, d ? d.rank.defRushYds : null, "run")}
+        {who && who.backs.length > 0 && groupHead("Run game", def.abbr, runD(d), "run")}
         {who && who.backs.map((x) => person(x, off.abbr, x.asRunner ? "QB" : (x.pos || "RB"), x.asRunner ? `rush TD in ${x.P.games.filter((gm) => (gm.rushTd || 0) > 0).length} of ${x.n}` : `TD in ${x.tdGames} of ${x.n}${x.tgt / x.n >= 3 ? " · " + f1(x.tgt / x.n) + " tgt/g" : ""}`, [
           cell(f1(x.car / x.n), "Car/g"), cell(R(x.rushYds / x.n), "Yds/g"), cell(x.asRunner ? x.rushTd : x.rushTd + x.recTd, x.asRunner ? "Rush TD" : "TD"), cell(x.rz ? x.rz.glCar : "—", "GL car", x.rz && x.rz.glCar >= 5),
         ]))}
@@ -3395,7 +3448,7 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
       {side(g.away, g.home, implied ? implied.away : null)}
       {side(g.home, g.away, implied ? implied.home : null)}
       <div className="px-3 py-2 text-[9px] leading-snug text-slate-400 border-t border-slate-100 dark:border-slate-800">
-        <span className={GOOD + " font-bold"}>Green</span> and a long bar are good for the team with the ball; <span className={BAD + " font-bold"}>red</span> and a short bar are bad. EDGE = top-10 offense against a bottom-10 defense; TOUGH = top-10 defense; BEST VS BEST = both top 10. Ranks are out of {n}; for a defense, (1st) allows the fewest. EZ tgt = targets thrown into the end zone. GL car = carries inside the 5 (designed runs; scrambles aren't counted). Vegas pts = half the over/under, plus or minus half the spread.{through ? ` Stats through Week ${through}.` : ""}{rz ? "" : " End-zone data is still loading."}
+        <span className={GOOD + " font-bold"}>Green</span> and a long bar are good for the team with the ball; <span className={BAD + " font-bold"}>red</span> and a short bar are bad. EDGE = top-10 offense against a bottom-10 defense; TOUGH = top-10 defense; BEST VS BEST = both top 10. Ranks are out of {n}; for a defense, (1st) allows the fewest. "Soft" and "stout" are judged per pass attempt and per carry, not per game, so a losing team's low passing yards don't make it look good. EZ tgt = targets thrown into the end zone. GL car = carries inside the 5 (designed runs; scrambles aren't counted). Vegas pts = half the over/under, plus or minus half the spread.{through ? ` Stats through Week ${through}.` : ""}{rz ? "" : " End-zone data is still loading."}
       </div>
     </div>
   );
