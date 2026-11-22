@@ -1042,7 +1042,9 @@ function FormationView({ roster, abbr, unit, setUnit, onSelectPlayer, lineRank, 
     // Left-to-right ordering inside a row: L-side labels, then the "1" of an
     // edge position (SAM/WILL/OLB1/DE1/CB1), interior, "2" of an edge, R-side.
     const EDGE_BASES = new Set(["DE", "EDGE", "OLB", "CB", "S"]);
-    const LEFT_NAMES = new Set(["SAM", "SLB"]), RIGHT_NAMES = new Set(["WILL", "WLB"]);
+    // Strong side = the tight end's side, and the offense view draws the TE on
+    // the right, so SAM lines up on the right and WILL on the left.
+    const LEFT_NAMES = new Set(["WILL", "WLB"]), RIGHT_NAMES = new Set(["SAM", "SLB"]);
     // 0 = left edge · 1 = left interior · 2 = middle · 3 = right interior · 4 = right edge
     // So LDE · LDT · RDT · RDE lines up as a real front, not LDT · LDE · RDE · RDT.
     const sideKey = (b0, d) => {
