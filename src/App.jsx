@@ -3301,13 +3301,25 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
       : [runSoft ? `easy to run on` : runStout ? `hard to run on` : null, passSoft ? `easy to throw on` : passStout ? `hard to throw on` : null].filter(Boolean).length
         ? `The ${D} are ` + [runSoft ? `easy to run on` : runStout ? `hard to run on` : null, passSoft ? `easy to throw on` : passStout ? `hard to throw on` : null].filter(Boolean).join(" and ") + "."
         : `The ${D} are average against both.`;
-    const likeRun = !runStout && (runSoft || runGood || identity === "Run-heavy");
-    const likePass = !passStout && (passSoft || passGood || identity === "Pass-heavy");
+    // An advantage needs BOTH halves: a defense that gives it up AND an offense
+    // that can take it. A soft pass defense is no help to a bottom-10 passing game.
+    const passBad = o.rank.offPassYds != null && o.rank.offPassYds >= soft, runBad = o.rank.offRushYds != null && o.rank.offRushYds >= soft;
+    const newQb = !!(who && who.qb && who.qb.n < 3);
+    const likeRun = !runStout && !runBad && (runSoft || runGood || identity === "Run-heavy");
+    const likePass = !passStout && !passBad && !newQb && (passSoft || passGood || identity === "Pass-heavy");
     const last = (x) => { const parts = String(x.P.name).split(" "); return /^(jr\.?|sr\.?|ii|iii|iv|v)$/i.test(parts[parts.length - 1] || "") ? parts.slice(-2, -1)[0] : parts[parts.length - 1]; };
+    // ...and a player is only worth naming if he's actually producing.
+    const backOk = (b) => (b.asRunner ? b.rushTd >= 3 || b.car / b.n >= 6 : b.car / b.n >= 12 || b.rushTd + b.recTd >= 3);
+    const qbOk = (q) => q.n >= 3 && q.passTd / q.n >= 1.2;
+    const catchOk = (c) => c.tgt / c.n >= 6 || c.recTd + c.rushTd >= 3;
     const names = [];
-    if (who && likeRun) for (const b of who.backs.slice(0, 2)) names.push(last(b));
-    if (who && likePass) { if (who.qb && !names.includes(last(who.qb))) names.push(last(who.qb)); if (who.catchers[0]) names.push(last(who.catchers[0])); }
-    const lean = likeRun && likePass ? "Good spot on the ground and through the air." : likeRun ? "The run game is the better side." : likePass ? "The passing game is the better side." : "No clear advantage for this offense.";
+    if (who && likeRun) for (const b of who.backs.slice(0, 2)) if (backOk(b)) names.push(last(b));
+    if (who && likePass) { if (who.qb && qbOk(who.qb) && !names.includes(last(who.qb))) names.push(last(who.qb)); for (const c of who.catchers.slice(0, 2)) if (catchOk(c) && names.length < 4) names.push(last(c)); }
+    const starts = newQb ? `${who.qb.P.name} has only ${who.qb.n} start${who.qb.n === 1 ? "" : "s"}` : "";
+    const wasted = [passSoft && passBad ? `the ${O}' passing game ranks ${ordinal(o.rank.offPassYds)}` : null, passSoft && !passBad && newQb ? starts : null, runSoft && runBad ? `the ${O}' run game ranks ${ordinal(o.rank.offRushYds)}` : null].filter(Boolean);
+    const lean = (likeRun && likePass ? "Good spot on the ground and through the air." : likeRun ? "The run game is the better side." : likePass ? "The passing game is the better side." : "No clear advantage for this offense.")
+      + (wasted.length ? ` The opening is there, but ${wasted.join(" and ")}.` : "")
+      + (newQb && !wasted.includes(starts) ? ` ${starts}, so the team's passing numbers aren't his.` : "");
     return { text: `${s1} ${s2} ${lean}`, names, good: likeRun || likePass };
   };
   const side = (off, def, pts) => {
@@ -3351,7 +3363,7 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
           </>
         ) : <div className="px-3 py-2 text-[10px] text-slate-400">Team stats aren't in yet.</div>}
         {who && (who.qb || who.catchers.length > 0) && groupHead("Passing game", def.abbr, d ? d.rank.defPassYds : null, "pass")}
-        {who && who.qb && person(who.qb, off.abbr, "QB", `${who.qb.n} games`, [
+        {who && who.qb && person(who.qb.n < 3 ? { ...who.qb, tag: "New QB" } : who.qb, off.abbr, "QB", `${who.qb.n} game${who.qb.n === 1 ? "" : "s"}`, [
           cell(R(who.qb.passYds / who.qb.n), "Yds/g"), cell(f1(who.qb.passTd / who.qb.n), "TD/g"), cell(f1(who.qb.att / who.qb.n), "Att/g"), cell(`${who.qb.multiPassTd}/${who.qb.n}`, "2+ TD gm"),
         ])}
         {who && who.catchers.map((x) => person(x, off.abbr, x.pos || "WR", `TD in ${x.tdGames} of ${x.n}`, [
