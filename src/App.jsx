@@ -2424,7 +2424,8 @@ function TeamStatsPanel({ roster, abbr, seasonStats, mode, setMode, onSelectPlay
               if (!list.length) return null;
               return (
                 <Section title={yr + " End Zone Targets"}>
-                  {list.map(({ p, ez, rzT }) => <Bar key={p.id} label={p.name} sub={" " + (p.pos || "") + " · " + rzT + " red-zone tgt"} pct={(ez / list[0].ez) * 100} val={String(ez)} color={color} onClick={() => onSelectPlayer(p)} />)}
+                  {list.map(({ p, ez }) => <Bar key={p.id} label={p.name} sub={" " + (p.pos || "")} pct={(ez / list[0].ez) * 100} val={String(ez)} color={color} onClick={() => onSelectPlayer(p)} />)}
+                  <div className="text-[9px] text-slate-400 mt-1.5">Passes thrown to him in the end zone.</div>
                 </Section>
               );
             })()}
@@ -2445,6 +2446,27 @@ function TeamStatsPanel({ roster, abbr, seasonStats, mode, setMode, onSelectPlay
             <Section title={yr + " Receiving · target share"}>
               {rec.map(({ p, s }) => <Bar key={p.id} label={p.name} sub={" " + (p.pos || "")} arrow={<TrendArrow row={s} k="tgt" />} pct={(s.totals.tgt / Math.max(1, targets)) * 100} val={Math.round((s.totals.tgt / Math.max(1, targets)) * 100) + "% · " + s.totals.tgt + " tgt"} color={color} onClick={() => onSelectPlayer(p)} />)}
             </Section>
+            {(() => {
+              // What the team does inside the 20: every red-zone carry and
+              // target is one "look"; each player's share of all of them.
+              if (!rz) return null;
+              let tCar = 0, tTgt = 0;
+              for (const q of Object.values(rz.players || {})) if (injTeamEq(q.team, abbr)) { const t = rzSum(q); tCar += t.rzCar; tTgt += t.rzTgt; }
+              const total = tCar + tTgt;
+              if (!total) return null;
+              const list = roster.map((p) => { const q = rzFind(rz, p.name, abbr); const t = q ? rzSum(q) : null; return { p, car: t ? t.rzCar : 0, tgt: t ? t.rzTgt : 0 }; })
+                .map((x) => ({ ...x, looks: x.car + x.tgt })).filter((x) => x.looks > 0).sort((a, b) => b.looks - a.looks).slice(0, 8);
+              if (!list.length) return null;
+              const pct = (x) => Math.round((x / total) * 100);
+              return (
+                <Section title={yr + " Red Zone Share"}>
+                  <div className="text-[10px] font-bold text-slate-500 dark:text-slate-400 mb-1">Inside the 20: {pct(tCar)}% run · {pct(tTgt)}% pass</div>
+                  {list.map((x) => <Bar key={x.p.id} label={x.p.name} sub={" " + (x.p.pos || "")} pct={(x.looks / list[0].looks) * 100}
+                    val={pct(x.looks) + "% · " + [x.car ? x.car + " car" : null, x.tgt ? x.tgt + " tgt" : null].filter(Boolean).join(" + ")} color={color} onClick={() => onSelectPlayer(x.p)} />)}
+                  <div className="text-[9px] text-slate-400 mt-1.5">Share of the team's red-zone carries and targets. Carries are designed runs; quarterback scrambles aren't counted.</div>
+                </Section>
+              );
+            })()}
           </>
         );
       })() : (() => {
@@ -3217,25 +3239,26 @@ function tapePlayers(stats, rz, through, abbr) {
   const qb = rows.filter((x) => x.att >= 10).sort((a, b) => b.recentAtt - a.recentAtt || b.att - a.att)[0] || null;
   const skill = rows.filter((x) => x !== qb && x.pos !== "QB");
   const catchers = skill.filter((x) => x.tgt >= 5 && x.n >= minG).sort((a, b) => b.tgt / b.n - a.tgt / a.n).slice(0, 2);
-  const ezLead = skill.filter((x) => x.rz && x.rz.ezTgt >= 3).sort((a, b) => b.rz.ezTgt - a.rz.ezTgt || b.tgt - a.tgt)[0];
-  if (ezLead && !catchers.includes(ezLead)) catchers.push({ ...ezLead, tag: "EZ leader" });
+  // the leaders in red-zone work always make the list, and are tagged as such
+  const lead = (list, key, min) => list.filter((x) => x.rz && x.rz[key] >= min).sort((a, b) => b.rz[key] - a.rz[key] || b.tgt + b.car - (a.tgt + a.car))[0] || null;
+  const rzLead = lead(skill, "rzTgt", 3), ezLead = lead(skill, "ezTgt", 2);
+  for (const L of [rzLead, ezLead]) if (L && !catchers.includes(L)) catchers.push(L);
   const isBack = (x) => x.pos === "RB" || x.pos === "FB" || x.car > x.tgt;
   const backs = skill.filter((x) => x.car >= 5 && x.n >= minG && isBack(x)).sort((a, b) => b.car / b.n - a.car / a.n).slice(0, 1);
-  const glLead = skill.filter((x) => isBack(x) && x.rz && x.rz.glCar >= 3).sort((a, b) => b.rz.glCar - a.rz.glCar || b.car - a.car)[0];
-  if (glLead && !backs.some((b) => b.P === glLead.P)) backs.push({ ...glLead, tag: "GL back" });
+  const glLead = lead(skill.filter(isBack), "glCar", 3);
+  if (glLead && !backs.includes(glLead)) backs.push(glLead);
   // A quarterback who runs (Allen, Hurts, Jackson) is part of the run game:
   // 4+ carries a game, or 3+ rushing TDs. Slots in right behind the lead back.
   if (qb && (qb.car / qb.n >= 4 || qb.rushTd >= 3)) backs.splice(Math.min(1, backs.length), 0, { ...qb, asRunner: true });
-  return { qb, catchers, backs };
+  const tagOf = (x) => [x === rzLead && x === ezLead ? "RZ + EZ leader" : x === rzLead ? "RZ leader" : x === ezLead ? "EZ leader" : null, x === glLead ? "GL leader" : null].filter(Boolean).join(" · ") || null;
+  return { qb, catchers: catchers.map((x) => ({ ...x, tag: tagOf(x) })), backs: backs.map((x) => (x.asRunner ? x : { ...x, tag: tagOf(x) })) };
 }
 function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
   const n = Object.keys(rows || {}).length || 32, soft = n - 9;
   const rowOf = (abbr) => { const k = Object.keys(rows || {}).find((x) => injTeamEq(x, abbr)); return k ? rows[k] : null; };
   const GOOD = "text-emerald-600 dark:text-emerald-400", BAD = "text-rose-600 dark:text-rose-400", MID = "text-slate-900 dark:text-white";
   const BAR_G = "bg-emerald-500", BAR_R = "bg-rose-500", BAR_N = "bg-slate-400 dark:bg-slate-500";
-  const CHIP_G = "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300";
-  const CHIP_R = "bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-300";
-  const CHIP_N = "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300";
+  const CHIP_G = "bg-emerald-500 text-white", CHIP_R = "bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-300", CHIP_N = "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300";
   // "good" always means good for the team WITH the ball: a top-10 offense, or
   // a bottom-10 defense across from it.
   const offGrade = (r) => (r == null ? 0 : r <= 10 ? 1 : r >= soft ? -1 : 0);
@@ -3245,19 +3268,19 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
   const ord = (r) => (r == null ? "" : "(" + ordinal(r) + ")");
   const f1 = (x) => (Math.round(x * 10) / 10).toFixed(1);
   const R = Math.round;
-  const nick = (abbr) => { const k = HELMET_NICK[abbr] || abbr; return k.charAt(0) + k.slice(1).toLowerCase(); };
-  // Vegas' expected points per team: half the over/under, plus half the spread
-  // for the favourite and minus half for the underdog. Pre-game only.
-  const implied = (() => {
+  // Vegas' expected points: half the over/under, plus half the spread for the
+  // favourite and minus half for the underdog. Pre-game only.
+  const vegas = (() => {
     const o = g.odds;
     if (!o || g.state !== "pre" || o.overUnder == null || o.spread == null) return null;
     const ou = Number(o.overUnder), sp = Math.abs(Number(o.spread));
     if (!isFinite(ou) || !isFinite(sp) || ou <= 0) return null;
     const homeFav = o.homeFav || (!o.awayFav && Number(o.spread) < 0);
     const fav = ou / 2 + sp / 2, dog = ou / 2 - sp / 2;
-    return o.homeFav || o.awayFav || sp ? { home: homeFav ? fav : dog, away: homeFav ? dog : fav } : { home: ou / 2, away: ou / 2 };
+    return { home: homeFav ? fav : dog, away: homeFav ? dog : fav, homeBy: sp ? (homeFav ? sp : -sp) : 0 };
   })();
   const fullOf = (P) => { const key = hrbNrmSafe(P.name); return players.find((x) => hrbNrmSafe(x.name) === key) || null; };
+  const lastName = (x) => { const parts = String(x.P.name).split(" "); return /^(jr\.?|sr\.?|ii|iii|iv|v)$/i.test(parts[parts.length - 1] || "") ? parts.slice(-2, -1)[0] : parts[parts.length - 1]; };
   const cell = (v, lbl, hot) => (
     <span key={lbl} className="w-[2.6rem] shrink-0 text-center leading-none">
       <span className={"block text-[13px] font-black tabular-nums " + (hot ? "text-amber-500" : "text-slate-900 dark:text-white")}>{v}</span>
@@ -3269,7 +3292,7 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
     const full = fullOf(x.P);
     const initials = String(x.P.name).split(" ").map((w) => w[0]).slice(0, 2).join("");
     return (
-      <button key={x.P.id + (x.tag || "") + (x.asRunner ? "run" : "")} onClick={() => full && onSelect(full)} className="w-full flex items-center gap-2 px-3 py-2 border-t border-slate-100 dark:border-slate-800 text-left active:bg-slate-50 dark:active:bg-slate-800">
+      <button key={x.P.id + (x.asRunner ? "run" : "")} onClick={() => full && onSelect(full)} className="w-full flex items-center gap-2 px-3 py-2 border-t border-slate-100 dark:border-slate-800 text-left active:bg-slate-50 dark:active:bg-slate-800">
         <Headshot p={full || { name: x.P.name }} abbr={abbr} className="w-9 h-9 max-w-none shrink-0 rounded-full object-cover object-top bg-slate-100 dark:bg-slate-800"
           fallback={<span className="w-9 h-9 shrink-0 rounded-full flex items-center justify-center text-[10px] font-extrabold bg-slate-100 dark:bg-slate-800 text-slate-400">{initials}</span>} />
         <span className="min-w-0 flex-1">
@@ -3279,26 +3302,24 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
           </span>
           <span className="block text-[9px] font-semibold text-slate-400 truncate">
             <span className="font-extrabold text-slate-500 dark:text-slate-300">{pos}</span>
-            {x.tag && <span className="rounded px-1 py-px ml-1 text-[7px] font-extrabold uppercase tracking-wide bg-amber-500/20 text-amber-600 dark:text-amber-400">{x.tag}</span>}
-            {" · " + (x.tag ? String(sub).replace(/^TD in (\d+) of (\d+).*$/, "TD $1/$2") : sub)}
+            {x.tag ? <span className="rounded px-1 py-px ml-1 text-[7px] font-extrabold uppercase tracking-wide bg-amber-500/20 text-amber-600 dark:text-amber-400">{x.tag}</span> : " · " + sub}
           </span>
         </span>
         <span className="flex shrink-0">{cells}</span>
       </button>
     );
   };
-  const groupHead = (title, defAbbr, r, what) => (
-    <div className="flex items-center justify-between gap-2 px-3 pt-3 pb-1.5">
-      <span className="text-[10px] font-black tracking-widest uppercase text-slate-900 dark:text-white">{title}</span>
-      {r != null && <span className={"rounded-full px-2 py-0.5 text-[9px] font-extrabold whitespace-nowrap " + (r >= soft ? CHIP_G : r <= 10 ? CHIP_R : CHIP_N)}>{defAbbr} {r >= soft ? "soft" : r <= 10 ? "stout" : "average"} vs {what} {ord(r)}</span>}
-    </div>
-  );
   // One stat row: the offense's number on the left, what the defense allows on
-  // the right, a meter under each. A longer, greener meter is better for the offense.
-  // plainDef: show the defense's per-game number without a verdict, because the
-  // per-play row beneath it is the one that says whether the defense is good.
-  const line = (label, ov, or_, dv, dr, plainDef) => {
-    const og = offGrade(or_), dg = plainDef ? 0 : defGrade(dr);
+  // the right, a meter under each. Longer and greener is better for the offense.
+  // perPlay = the defense's per-attempt / per-carry grade; when it says the
+  // opposite of the per-game number (a losing team nobody needs to throw on),
+  // the per-game colour is dropped rather than shown as a strength.
+  const defShown = (dr, playRank) => {
+    const dg = defGrade(dr), pp = playRank != null ? defGrade(playRank) : null;
+    return pp != null && dg !== 0 && pp === -dg ? 0 : dg;
+  };
+  const line = (label, ov, or_, dv, dr, dg) => {
+    const og = offGrade(or_);
     const edge = og > 0 && dg > 0, tough = dg < 0 && og <= 0, clash = og > 0 && dg < 0;
     const ow = or_ == null ? 0 : ((n + 1 - or_) / n) * 100, dw = dr == null ? 0 : (dr / n) * 100;
     return (
@@ -3318,79 +3339,39 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
       </div>
     );
   };
-  // The bottom line, in plain English: how they play, what the defense gives
-  // up, and which players that points to.
-  const passD = (d) => (d ? d.rank.defPassYpa ?? d.rank.defPassYds : null), runD = (d) => (d ? d.rank.defRushYpc ?? d.rank.defRushYds : null);
-  // how many points this offense is favoured by (negative = underdog); pre-game only
-  const marginFor = (isHome) => {
-    const o = g.odds;
-    if (!o || g.state !== "pre" || o.spread == null) return null;
-    const sp = Math.abs(Number(o.spread)); if (!isFinite(sp)) return null;
-    const homeFav = o.homeFav || (!o.awayFav && Number(o.spread) < 0);
-    return (isHome ? homeFav : !homeFav) ? sp : -sp;
-  };
-  const bottomLine = (off, def, o, d, who, identity, margin) => {
-    if (!o || !d) return null;
-    const pR = passD(d), rR = runD(d);
-    const passSoft = pR != null && pR >= soft, passStout = pR != null && pR <= 10, runSoft = rR != null && rR >= soft, runStout = rR != null && rR <= 10;
-    const passGood = o.rank.offPassYds != null && o.rank.offPassYds <= 10, runGood = o.rank.offRushYds != null && o.rank.offRushYds <= 10;
-    const D = nick(def.abbr), O = nick(off.abbr);
-    const s1 = identity === "Run-heavy" ? `The ${O} like to run the ball.` : identity === "Pass-heavy" ? `The ${O} like to throw the ball.` : `The ${O} mix the run and the pass.`;
-    const s2 = runSoft && passSoft ? `The ${D} struggle to stop both.` : runStout && passStout ? `The ${D} are good at stopping both.`
-      : [runSoft ? `easy to run on` : runStout ? `hard to run on` : null, passSoft ? `easy to throw on` : passStout ? `hard to throw on` : null].filter(Boolean).length
-        ? `The ${D} are ` + [runSoft ? `easy to run on` : runStout ? `hard to run on` : null, passSoft ? `easy to throw on` : passStout ? `hard to throw on` : null].filter(Boolean).join(" and ") + "."
-        : `The ${D} are average against both.`;
-    // An advantage needs BOTH halves: a defense that gives it up AND an offense
-    // that can take it. A soft pass defense is no help to a bottom-10 passing game.
-    const passBad = o.rank.offPassYds != null && o.rank.offPassYds >= soft, runBad = o.rank.offRushYds != null && o.rank.offRushYds >= soft;
-    const newQb = !!(who && who.qb && who.qb.n < 3);
-    const likeRun = !runStout && !runBad && (runSoft || runGood || identity === "Run-heavy");
-    const likePass = !passStout && !passBad && !newQb && (passSoft || passGood || identity === "Pass-heavy");
-    const last = (x) => { const parts = String(x.P.name).split(" "); return /^(jr\.?|sr\.?|ii|iii|iv|v)$/i.test(parts[parts.length - 1] || "") ? parts.slice(-2, -1)[0] : parts[parts.length - 1]; };
-    // ...and a player is only worth naming if he's actually producing.
-    const backOk = (b) => (b.asRunner ? b.rushTd >= 3 || b.car / b.n >= 6 : b.car / b.n >= 12 || b.rushTd + b.recTd >= 3);
-    const qbOk = (q) => q.n >= 3 && q.passTd / q.n >= 1.2;
-    const catchOk = (c) => c.tgt / c.n >= 6 || c.recTd + c.rushTd >= 3;
-    // Yards and touchdowns are different questions. When the side we like runs
-    // into a defense that's stingy with touchdowns, say so instead of implying both.
-    const tdNote = (liked, kind, offTd, defTd, where) => {
-      if (!liked || defTd == null) return "";
-      if (defTd <= 10) return offTd != null && offTd <= 10
-        ? ` Touchdowns are best against best: the ${O} are ${ordinal(offTd)} in ${kind} TDs, the ${D} allow the ${ordinal(defTd)}-fewest. Yards are the safer read than touchdowns.`
-        : ` But the ${D} allow few ${kind} touchdowns (${ordinal(defTd)}-fewest), so think yards more than touchdowns.`;
-      if (defTd >= soft) return ` The ${D} also give up touchdowns ${where} (${ordinal(defTd)}).`;
-      return "";
-    };
-    // Game script: raw yards allowed can say the opposite of yards per play, and
-    // a big spread changes what an offense will be doing in the second half.
-    const scriptNote = () => {
-      let t = "";
-      if (d.rank.defPassYpa != null && d.rank.defPassYds <= 10 && d.rank.defPassYpa > 16) t += ` Don't be fooled by the ${D}' passing yards allowed (${ordinal(d.rank.defPassYds)}-fewest): teams get ahead and stop throwing. Per throw they rank ${ordinal(d.rank.defPassYpa)}.`;
-      else if (d.rank.defPassYpa != null && d.rank.defPassYds >= soft && d.rank.defPassYpa <= 16) t += ` The ${D} give up passing yards on volume (teams chasing them throw a lot), not per throw (${ordinal(d.rank.defPassYpa)}).`;
-      if (d.rank.defRushYpc != null && d.rank.defRushYds >= soft && d.rank.defRushYpc <= 16) t += ` The ${D} give up rushing yards on volume (teams run out the clock on them), not per carry (${ordinal(d.rank.defRushYpc)}).`;
-      if (margin != null && margin >= 7) t += ` Favored by ${margin}, the ${O} may run more and throw less late.`;
-      else if (margin != null && margin <= -7) t += ` As ${-margin}-point underdogs, the ${O} will likely have to throw to catch up.`;
-      return t;
-    };
-    const names = [];
-    if (who && likeRun) for (const b of who.backs.slice(0, 2)) if (backOk(b)) names.push(last(b));
-    if (who && likePass) { if (who.qb && qbOk(who.qb) && !names.includes(last(who.qb))) names.push(last(who.qb)); for (const c of who.catchers.slice(0, 2)) if (catchOk(c) && names.length < 4) names.push(last(c)); }
-    const starts = newQb ? `${who.qb.P.name} has only ${who.qb.n} start${who.qb.n === 1 ? "" : "s"}` : "";
-    const wasted = [passSoft && passBad ? `the ${O}' passing game ranks ${ordinal(o.rank.offPassYds)}` : null, passSoft && !passBad && newQb ? starts : null, runSoft && runBad ? `the ${O}' run game ranks ${ordinal(o.rank.offRushYds)}` : null].filter(Boolean);
-    const lean = (likeRun && likePass ? "Good spot on the ground and through the air." : likeRun ? "The run game is the better side." : likePass ? "The passing game is the better side." : "No clear advantage for this offense.")
-      + (wasted.length ? ` The opening is there, but ${wasted.join(" and ")}.` : "")
-      + (newQb && !wasted.includes(starts) ? ` ${starts}, so the team's passing numbers aren't his.` : "")
-      + tdNote(likeRun, "rushing", o.rank.offRushTd, d.rank.defRushTd, "on the ground")
-      + tdNote(likePass, "passing", o.rank.offPassTd, d.rank.defPassTd, "through the air")
-      + scriptNote();
-    return { text: `${s1} ${s2} ${lean}`, names, good: likeRun || likePass };
-  };
-  const side = (off, def, pts) => {
+  // Is this side of the offense in a good spot? Count the colours on its two
+  // rows (yards and touchdowns, offense and defense): each green number is +1,
+  // each red is -1. +2 or better is a good spot, -2 or worse a tough one.
+  const CHIP_g = "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300";
+  const spotChip = (v) => <span className={"rounded-full px-2 py-0.5 text-[9px] font-extrabold tracking-wide whitespace-nowrap " + (v >= 2 ? CHIP_G : v === 1 ? CHIP_g : v <= -2 ? "bg-rose-500 text-white" : v === -1 ? CHIP_R : CHIP_N)}>{v >= 2 ? "GOOD SPOT" : v === 1 ? "SLIGHT EDGE" : v <= -2 ? "TOUGH SPOT" : v === -1 ? "SLIGHTLY TOUGH" : "EVEN"}</span>;
+  const groupHead = (title, v) => (
+    <div className="flex items-center justify-between gap-2 px-3 pt-3 pb-1.5">
+      <span className="text-[10px] font-black tracking-widest uppercase text-slate-900 dark:text-white">{title}</span>
+      {spotChip(v)}
+    </div>
+  );
+  const side = (off, def, pts, by) => {
     const o = rowOf(off.abbr), d = rowOf(def.abbr);
     const pr = o ? o.rank.passRate : null;
     const identity = pr == null ? null : pr <= 8 ? "Pass-heavy" : pr >= n - 7 ? "Run-heavy" : "Balanced";
     const who = tapePlayers(stats, rz, through, off.abbr);
-    const bl = bottomLine(off, def, o, d, who, identity, marginFor(off === g.home));
+    const newQb = !!(who && who.qb && who.qb.n < 3);
+    const dg = o && d ? { py: defShown(d.rank.defPassYds, d.rank.defPassYpa), pt: defGrade(d.rank.defPassTd), ry: defShown(d.rank.defRushYds, d.rank.defRushYpc), rt: defGrade(d.rank.defRushTd) } : { py: 0, pt: 0, ry: 0, rt: 0 };
+    let passSpot = o && d ? offGrade(o.rank.offPassYds) + offGrade(o.rank.offPassTd) + dg.py + dg.pt : 0;
+    const runSpot = o && d ? offGrade(o.rank.offRushYds) + offGrade(o.rank.offRushTd) + dg.ry + dg.rt : 0;
+    if (newQb) passSpot = Math.min(passSpot, 0);   // the team's passing numbers aren't his
+    // who to look at: at most three names, from the side(s) with an edge
+    const names = [];
+    const rzWork = (x) => (x.rz ? x.rz.rzTgt + x.rz.ezTgt + x.rz.rzCar + x.rz.glCar : 0);
+    if (who && runSpot >= 1) for (const b of who.backs.slice(0, 2)) if (b.asRunner ? b.rushTd >= 3 || b.car / b.n >= 6 : b.car / b.n >= 12 || b.rushTd + b.recTd >= 3) names.push(lastName(b));
+    if (who && passSpot >= 1) {
+      if (who.qb && who.qb.passTd / who.qb.n >= 1.2 && !names.includes(lastName(who.qb))) names.push(lastName(who.qb));
+      for (const c of [...who.catchers].sort((a, b) => rzWork(b) - rzWork(a) || b.tgt / b.n - a.tgt / a.n)) if (names.length < 3 && (c.tgt / c.n >= 6 || c.recTd + c.rushTd >= 3 || c.tag)) names.push(lastName(c));
+    }
+    const best = Math.max(runSpot, passSpot);
+    const which = runSpot >= 1 && passSpot >= 1 ? "run and pass" : runSpot >= 1 ? "run game" : "passing game";
+    const lean = best >= 2 ? "Good spot: " + which : best === 1 ? "Slight edge: " + which : runSpot <= -2 && passSpot <= -2 ? "Tough spot" : "No clear edge";
+    const good = best >= 1;
     const base = off.color || teamColorSafe(off.abbr), l = lumOf(base || "#334155");
     const bg = l > 0.55 ? shade(base, -(l * 100 - 42)) : base;
     const logo = (lumOf(bg) < 0.5 ? darkLogo(off.abbr) : null) || off.logo || TEAM_LOGOS[off.abbr];
@@ -3401,42 +3382,39 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
           <img src={logo} alt="" className="w-9 h-9 object-contain shrink-0 drop-shadow" onError={(e) => { const f = off.logo || TEAM_LOGOS[off.abbr]; if (f && e.currentTarget.src !== f) e.currentTarget.src = f; }} />
           <div className="min-w-0 flex-1 leading-tight">
             <div className="text-[13px] font-black tracking-wide uppercase truncate">{HELMET_NICK[off.abbr] || off.abbr} offense</div>
-            {o && <div className="text-[10px] font-semibold text-white/80 truncate">{identity} · {R(o.val.passRate)}% pass {ord(pr)}</div>}
+            {o && <div className="text-[10px] font-semibold text-white/80 truncate">{identity} · {R(o.val.passRate)}% pass {ord(pr)}{by ? (by > 0 ? ` · Fav −${by}` : ` · Dog +${-by}`) : ""}</div>}
           </div>
           {pts != null && <span className="shrink-0 text-center leading-none rounded-lg bg-black/25 px-2.5 py-1.5">
             <span className="block text-[15px] font-black tabular-nums">{f1(pts)}</span>
             <span className="block text-[7px] font-extrabold tracking-wider uppercase text-white/75 mt-0.5">Vegas pts</span>
           </span>}
         </div>
-        {bl && <div className={"mx-3 mt-2.5 rounded-xl px-3 py-2 " + (bl.good ? "bg-emerald-50 dark:bg-emerald-500/10" : "bg-slate-50 dark:bg-slate-800/60")}>
-          <div className="text-[8px] font-black tracking-widest uppercase text-slate-500 dark:text-slate-400">Bottom line</div>
-          <div className="text-[11px] font-semibold leading-snug text-slate-800 dark:text-slate-100 mt-0.5">{bl.text}{bl.names.length > 0 && <> <span className="font-black">Watch: {bl.names.join(", ")}.</span></>}</div>
+        {/* the one-line read */}
+        {o && d && <div className={"flex items-center gap-2 px-3 py-2 " + (good ? "bg-emerald-50 dark:bg-emerald-500/10" : "bg-slate-50 dark:bg-slate-800/60")}>
+          <span className={"shrink-0 text-[10px] font-black tracking-wide uppercase " + (good ? GOOD : runSpot <= -2 && passSpot <= -2 ? BAD : "text-slate-500 dark:text-slate-300")}>{lean}</span>
+          {names.length > 0 && <span className="min-w-0 truncate text-[11px] font-bold text-slate-800 dark:text-slate-100">→ {names.slice(0, 3).join(", ")}</span>}
         </div>}
         {o && d ? (
           <>
-            <div className="grid grid-cols-[1fr_4.75rem_1fr] gap-x-1 px-3 pt-3 pb-0.5 text-[8px] font-extrabold tracking-widest uppercase text-slate-400">
+            <div className="grid grid-cols-[1fr_4.75rem_1fr] gap-x-1 px-3 pt-2.5 pb-0.5 text-[8px] font-extrabold tracking-widest uppercase text-slate-400">
               <span>{off.abbr} offense</span><span /><span className="text-right">{def.abbr} defense allows</span>
             </div>
-            {line("Pass yds/g", R(o.val.offPassYds), o.rank.offPassYds, R(d.val.defPassYds), d.rank.defPassYds, d.rank.defPassYpa != null)}
-            {(o.val.offPassYpa != null || d.val.defPassYpa != null) && line("Yds/pass", o.val.offPassYpa != null ? f1(o.val.offPassYpa) : "—", o.rank.offPassYpa, d.val.defPassYpa != null ? f1(d.val.defPassYpa) : "—", d.rank.defPassYpa)}
-            {line("Pass TD", o.val.offPassTd, o.rank.offPassTd, d.val.defPassTd, d.rank.defPassTd)}
-            {line("Rush yds/g", R(o.val.offRushYds), o.rank.offRushYds, R(d.val.defRushYds), d.rank.defRushYds, d.rank.defRushYpc != null)}
-            {(o.val.offRushYpc != null || d.val.defRushYpc != null) && line("Yds/carry", o.val.offRushYpc != null ? f1(o.val.offRushYpc) : "—", o.rank.offRushYpc, d.val.defRushYpc != null ? f1(d.val.defRushYpc) : "—", d.rank.defRushYpc)}
-            {line("Rush TD", o.val.offRushTd, o.rank.offRushTd, d.val.defRushTd, d.rank.defRushTd)}
-            {line("Points/g", f1(o.val.ppg), o.rank.ppg, f1(d.val.papg), d.rank.papg)}
-            <div className="px-3 pt-1 text-[9px] font-semibold text-slate-400">Pass attempts {ord(o.rank.passAtt)} · Rush attempts {ord(o.rank.rushAtt)}</div>
+            {line("Pass yds/g", R(o.val.offPassYds), o.rank.offPassYds, R(d.val.defPassYds), d.rank.defPassYds, dg.py)}
+            {line("Pass TD", o.val.offPassTd, o.rank.offPassTd, d.val.defPassTd, d.rank.defPassTd, dg.pt)}
+            {line("Rush yds/g", R(o.val.offRushYds), o.rank.offRushYds, R(d.val.defRushYds), d.rank.defRushYds, dg.ry)}
+            {line("Rush TD", o.val.offRushTd, o.rank.offRushTd, d.val.defRushTd, d.rank.defRushTd, dg.rt)}
           </>
         ) : <div className="px-3 py-2 text-[10px] text-slate-400">Team stats aren't in yet.</div>}
-        {who && (who.qb || who.catchers.length > 0) && groupHead("Passing game", def.abbr, passD(d), "pass")}
-        {who && who.qb && person(who.qb.n < 3 ? { ...who.qb, tag: "New QB" } : who.qb, off.abbr, "QB", `${who.qb.n} game${who.qb.n === 1 ? "" : "s"}`, [
+        {who && (who.qb || who.catchers.length > 0) && groupHead("Passing game", passSpot)}
+        {who && who.qb && person(newQb ? { ...who.qb, tag: "New QB" } : who.qb, off.abbr, "QB", `${who.qb.n} game${who.qb.n === 1 ? "" : "s"}`, [
           cell(R(who.qb.passYds / who.qb.n), "Yds/g"), cell(f1(who.qb.passTd / who.qb.n), "TD/g"), cell(f1(who.qb.att / who.qb.n), "Att/g"), cell(`${who.qb.multiPassTd}/${who.qb.n}`, "2+ TD gm"),
         ])}
         {who && who.catchers.map((x) => person(x, off.abbr, x.pos || "WR", `TD in ${x.tdGames} of ${x.n}`, [
-          cell(f1(x.tgt / x.n), "Tgt/g"), cell(R(x.recYds / x.n), "Yds/g"), cell(x.recTd + x.rushTd, "TD"), cell(x.rz ? x.rz.ezTgt : "—", "EZ tgt", x.rz && x.rz.ezTgt >= 5),
+          cell(f1(x.tgt / x.n), "Tgt/g"), cell(x.recTd + x.rushTd, "TD"), cell(x.rz ? x.rz.rzTgt : "—", "RZ tgt", x.rz && /RZ/.test(x.tag || "")), cell(x.rz ? x.rz.ezTgt : "—", "EZ tgt", x.rz && /EZ/.test(x.tag || "")),
         ]))}
-        {who && who.backs.length > 0 && groupHead("Run game", def.abbr, runD(d), "run")}
-        {who && who.backs.map((x) => person(x, off.abbr, x.asRunner ? "QB" : (x.pos || "RB"), x.asRunner ? `rush TD in ${x.P.games.filter((gm) => (gm.rushTd || 0) > 0).length} of ${x.n}` : `TD in ${x.tdGames} of ${x.n}${x.tgt / x.n >= 3 ? " · " + f1(x.tgt / x.n) + " tgt/g" : ""}`, [
-          cell(f1(x.car / x.n), "Car/g"), cell(R(x.rushYds / x.n), "Yds/g"), cell(x.asRunner ? x.rushTd : x.rushTd + x.recTd, x.asRunner ? "Rush TD" : "TD"), cell(x.rz ? x.rz.glCar : "—", "GL car", x.rz && x.rz.glCar >= 5),
+        {who && who.backs.length > 0 && groupHead("Run game", runSpot)}
+        {who && who.backs.map((x) => person(x, off.abbr, x.asRunner ? "QB" : (x.pos || "RB"), x.asRunner ? `rush TD in ${x.P.games.filter((gm) => (gm.rushTd || 0) > 0).length} of ${x.n}` : `TD in ${x.tdGames} of ${x.n}`, [
+          cell(f1(x.car / x.n), "Car/g"), cell(x.asRunner ? x.rushTd : x.rushTd + x.recTd, x.asRunner ? "Rush TD" : "TD"), cell(x.rz ? x.rz.rzCar : "—", "RZ car"), cell(x.rz ? x.rz.glCar : "—", "GL car", x.rz && /GL/.test(x.tag || "")),
         ]))}
         {!who && <div className="px-3 py-3 text-[10px] text-slate-400">No player stats yet.</div>}
         <div className="h-2" />
@@ -3445,10 +3423,10 @@ function MatchupBreakdown({ g, rows, stats, rz, through, players, onSelect }) {
   };
   return (
     <div className="rounded-b-xl border border-t-0 border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
-      {side(g.away, g.home, implied ? implied.away : null)}
-      {side(g.home, g.away, implied ? implied.home : null)}
+      {side(g.away, g.home, vegas ? vegas.away : null, vegas ? -vegas.homeBy : 0)}
+      {side(g.home, g.away, vegas ? vegas.home : null, vegas ? vegas.homeBy : 0)}
       <div className="px-3 py-2 text-[9px] leading-snug text-slate-400 border-t border-slate-100 dark:border-slate-800">
-        <span className={GOOD + " font-bold"}>Green</span> and a long bar are good for the team with the ball; <span className={BAD + " font-bold"}>red</span> and a short bar are bad. EDGE = top-10 offense against a bottom-10 defense; TOUGH = top-10 defense; BEST VS BEST = both top 10. Ranks are out of {n}; for a defense, (1st) allows the fewest. "Soft" and "stout" are judged per pass attempt and per carry, not per game, so a losing team's low passing yards don't make it look good. EZ tgt = targets thrown into the end zone. GL car = carries inside the 5 (designed runs; scrambles aren't counted). Vegas pts = half the over/under, plus or minus half the spread.{through ? ` Stats through Week ${through}.` : ""}{rz ? "" : " End-zone data is still loading."}
+        <span className={GOOD + " font-bold"}>Green</span> is good for the team with the ball (top-10 offense or bottom-10 defense), <span className={BAD + " font-bold"}>red</span> is bad. Good spot = at least two more green numbers than red on that side's two rows. Defense ranks: (1st) allows the fewest. RZ = inside the 20 · EZ = thrown into the end zone · GL = inside the 5.{through ? ` Through Week ${through}.` : ""}{rz ? "" : " Red-zone data is still loading."}
       </div>
     </div>
   );
